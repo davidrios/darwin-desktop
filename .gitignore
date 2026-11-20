@@ -1,0 +1,7 @@
+result
+result-*
+.direnv/
+/spikes/m0-wayland/wl-spike-server
+/spikes/m0-wayland/wl-spike-client
+*.dSYM/
+.DS_Store

@@ -1,0 +1,1020 @@
+diff --git a/cursor/os-compatibility.c b/cursor/os-compatibility.c
+index 2b54bae2..b2d03c4c 100644
+--- a/cursor/os-compatibility.c
++++ b/cursor/os-compatibility.c
+@@ -123,7 +123,7 @@ int
+ os_create_anonymous_file(off_t size)
+ {
+ 	static const char template[] = "/wayland-cursor-shared-XXXXXX";
+-	const char *path;
++	char *path;
+ 	char *name;
+ 	size_t name_size;
+ 	int fd;
+@@ -156,6 +156,12 @@ os_create_anonymous_file(off_t size)
+ #endif
+ 	{
+ 		path = getenv("XDG_RUNTIME_DIR");
++#ifdef __APPLE__
++		if (!path || path[0] != '/') {
++			path = getenv("TMPDIR");
++			fprintf(stderr, "Using TMPDIR=\"%s\" instead of XDG_RUNTIME_DIR\n", path);
++		}
++#endif
+ 		if (!path || path[0] != '/') {
+ 			errno = ENOENT;
+ 			return -1;
+diff --git a/egl/wayland-egl-symbols-check b/egl/wayland-egl-symbols-check
+index d04fd042..6adef0aa 100755
+--- a/egl/wayland-egl-symbols-check
++++ b/egl/wayland-egl-symbols-check
+@@ -14,7 +14,12 @@ if ! test -n "$NM"; then
+ 	exit 99
+ fi
+ 
+-AVAIL_FUNCS="$($NM -D --format=bsd --defined-only $LIB | awk '{print $3}')"
++# Assuming any system with SystemVersion.plist is a darwin-derivative and prefixes C symbols with _
++if [ -f "/System/Library/CoreServices/SystemVersion.plist" ] ; then
++    AVAIL_FUNCS="$($NM $LIB | awk '{print $3}' | sed 's:^_::')"
++else
++    AVAIL_FUNCS="$($NM -D --format=bsd --defined-only $LIB | awk '{print $3}')"
++fi
+ 
+ # Official ABI, taken from the header.
+ REQ_FUNCS="wl_egl_window_resize
+diff --git a/meson.build b/meson.build
+index 2c010be0..d1b24cb7 100644
+--- a/meson.build
++++ b/meson.build
+@@ -23,6 +23,10 @@ cc_args = []
+ if host_machine.system() not in ['freebsd', 'openbsd']
+ 	cc_args += ['-D_POSIX_C_SOURCE=200809L']
+ endif
++if host_machine.system() == 'darwin'
++	# For CMSG_LEN(), which is an RFC 2292 addition and not part of POSIX.1-2008
++	cc_args += ['-D_DARWIN_C_SOURCE']
++endif
+ add_project_arguments(cc_args, language: 'c')
+ 
+ compiler_flags = [
+@@ -44,6 +48,7 @@ endforeach
+ 
+ have_funcs = [
+ 	'accept4',
++	'getpeereid',
+ 	'mkostemp',
+ 	'posix_fallocate',
+ 	'prctl',
+@@ -74,7 +79,7 @@ endif
+ config_h.set10('HAVE_BROKEN_MSG_CMSG_CLOEXEC', have_broken_msg_cmsg_cloexec)
+ 
+ if get_option('libraries')
+-	if host_machine.system() in ['freebsd', 'openbsd']
++	if host_machine.system() in ['darwin', 'freebsd', 'openbsd']
+ 		# When building for FreeBSD, epoll(7) is provided by a userspace
+ 		# wrapper around kqueue(2).
+ 		epoll_dep = dependency('epoll-shim')
+@@ -82,11 +87,16 @@ if get_option('libraries')
+ 		# Otherwise, assume that epoll(7) is supported natively.
+ 		epoll_dep = []
+ 	endif
+-	ffi_dep = dependency('libffi')
++
++	if host_machine.system() == 'darwin'
++		ffi_dep = cc.find_library('ffi')
++	else
++		ffi_dep = dependency('libffi')
++	endif
+ 
+ 	decls = [
+-		{ 'header': 'sys/signalfd.h', 'symbol': 'SFD_CLOEXEC' },
+-		{ 'header': 'sys/timerfd.h', 'symbol': 'TFD_CLOEXEC' },
++		{ 'header': 'sys/signalfd.h', 'symbol': 'SFD_CLOEXEC', 'variable': 'HAVE_SIGNALFD' },
++		{ 'header': 'sys/timerfd.h', 'symbol': 'TFD_CLOEXEC', 'variable': 'HAVE_TIMERFD' },
+ 		{ 'header': 'time.h', 'symbol': 'CLOCK_MONOTONIC' },
+ 	]
+ 
+@@ -96,11 +106,20 @@ if get_option('libraries')
+ 		endif
+ 	endforeach
+ 
+-	rt_dep = []
+-	if not cc.has_function('clock_gettime', prefix: '#include <time.h>')
+-		rt_dep = cc.find_library('rt')
+-		if not cc.has_function('clock_gettime', prefix: '#include <time.h>', dependencies: rt_dep, args: cc_args)
+-			error('clock_gettime not found')
++	config_h.set(
++		'HAVE_ITIMERSPEC',
++		cc.has_members('struct itimerspec', 'it_interval', 'it_value', dependencies: epoll_dep)
++	)
++
++	if host_machine.system() == 'darwin'
++		rt_dep = []
++	else
++		rt_dep = []
++		if cc.has_function('clock_gettime', prefix: '#include <time.h>')
++			rt_dep = cc.find_library('rt')
++			if not cc.has_function('clock_gettime', prefix: '#include <time.h>', dependencies: rt_dep, args: cc_args)
++				error('clock_gettime not found')
++			endif
+ 		endif
+ 	endif
+ endif
+diff --git a/src/connection.c b/src/connection.c
+index 6ab20ab0..c3c897af 100644
+--- a/src/connection.c
++++ b/src/connection.c
+@@ -40,7 +40,11 @@
+ #include <sys/types.h>
+ #include <sys/socket.h>
+ #include <time.h>
++#ifdef __APPLE__
++#include <ffi/ffi.h>
++#else
+ #include <ffi.h>
++#endif
+ 
+ #include "wayland-util.h"
+ #include "wayland-private.h"
+@@ -492,7 +496,10 @@ wl_connection_flush(struct wl_connection *connection)
+ 
+ 		do {
+ 			len = sendmsg(connection->fd, &msg,
+-				      MSG_NOSIGNAL | MSG_DONTWAIT);
++	#ifdef MSG_NOSIGNAL
++					MSG_NOSIGNAL |
++	#endif
++					MSG_DONTWAIT);
+ 		} while (len == -1 && errno == EINTR);
+ 
+ 		if (len == -1)
+@@ -1237,10 +1244,11 @@ wl_closure_invoke(struct wl_closure *closure, uint32_t flags,
+ 	}
+ 
+ 	if (!implementation[opcode]) {
+-		wl_abort("listener function for opcode %u of %s is NULL\n",
++		wl_log("listener function for opcode %u of %s is NULL\n",
+ 			 opcode, target->interface->name);
++	} else {
++		ffi_call(&cif, implementation[opcode], NULL, ffi_args);
+ 	}
+-	ffi_call(&cif, implementation[opcode], NULL, ffi_args);
+ 
+ 	wl_closure_clear_fds(closure);
+ }
+@@ -1283,7 +1291,6 @@ copy_fds_to_connection(struct wl_closure *closure,
+ 	return 0;
+ }
+ 
+-
+ static uint32_t
+ buffer_size_for_closure(struct wl_closure *closure)
+ {
+diff --git a/src/event-loop.c b/src/event-loop.c
+index 89294fd9..3074f9f0 100644
+--- a/src/event-loop.c
++++ b/src/event-loop.c
+@@ -38,13 +38,30 @@
+ #include <sys/signalfd.h>
+ #include <sys/timerfd.h>
+ #include <unistd.h>
++
+ #include "timespec-util.h"
++
++#include "../config.h"
++
+ #include "wayland-util.h"
+ #include "wayland-private.h"
+ #include "wayland-server-core.h"
+ #include "wayland-server-private.h"
+ #include "wayland-os.h"
+ 
++#ifdef HAVE_SIGNALFD
++#include <sys/signalfd.h>
++#endif
++#ifdef HAVE_TIMERFD
++#include <sys/timerfd.h>
++#endif
++#if !defined(HAVE_ITIMERSPEC) && !defined(COMPAT_ENABLE_ITIMERSPEC)
++struct itimerspec {
++	struct timespec it_interval;
++	struct timespec it_value;
++};
++#endif
++
+ /** \cond INTERNAL */
+ 
+ #define TIMER_REMOVED -2
+@@ -76,7 +93,9 @@ struct wl_event_loop {
+ 
+ 	struct wl_priv_signal destroy_signal;
+ 
++#ifdef HAVE_TIMERFD
+ 	struct wl_timer_heap timers;
++#endif
+ };
+ 
+ struct wl_event_source_interface {
+@@ -105,10 +124,14 @@ wl_event_source_fd_dispatch(struct wl_event_source *source,
+ 		mask |= WL_EVENT_READABLE;
+ 	if (ep->events & EPOLLOUT)
+ 		mask |= WL_EVENT_WRITABLE;
++#ifdef EPOLLHUP
+ 	if (ep->events & EPOLLHUP)
+ 		mask |= WL_EVENT_HANGUP;
++#endif
++#ifdef EPOLLERR
+ 	if (ep->events & EPOLLERR)
+ 		mask |= WL_EVENT_ERROR;
++#endif
+ 
+ 	return fd_source->func(fd_source->fd, mask, source->data);
+ }
+@@ -228,6 +251,8 @@ wl_event_source_fd_update(struct wl_event_source *source, uint32_t mask)
+ 	return epoll_ctl(loop->epoll_fd, EPOLL_CTL_MOD, source->fd, &ep);
+ }
+ 
++#ifdef HAVE_TIMERFD
++
+ /** \cond INTERNAL */
+ 
+ struct wl_event_source_timer {
+@@ -661,6 +686,10 @@ wl_event_source_timer_update(struct wl_event_source *source, int ms_delay)
+ 	return 0;
+ }
+ 
++#endif /* HAVE_TIMERFD */
++
++#ifdef HAVE_SIGNALFD
++
+ /** \cond INTERNAL */
+ 
+ struct wl_event_source_signal {
+@@ -738,6 +767,8 @@ wl_event_loop_add_signal(struct wl_event_loop *loop,
+ 	return add_source(loop, &source->base, WL_EVENT_READABLE, data);
+ }
+ 
++#endif /* HAVE_SIGNALFD */
++
+ /** \cond INTERNAL */
+ 
+ struct wl_event_source_idle {
+@@ -841,6 +872,7 @@ wl_event_source_remove(struct wl_event_source *source)
+ 		source->fd = -1;
+ 	}
+ 
++#ifdef HAVE_TIMERFD
+ 	if (source->interface == &timer_source_interface &&
+ 	    source->fd != TIMER_REMOVED) {
+ 		/* Disarm the timer (and the loop's timerfd, if necessary),
+@@ -851,6 +883,7 @@ wl_event_source_remove(struct wl_event_source *source)
+ 		 * be dispatched in `wl_event_loop_dispatch` */
+ 		source->fd = TIMER_REMOVED;
+ 	}
++#endif
+ 
+ 	wl_list_remove(&source->link);
+ 	wl_list_insert(&loop->destroy_list, &source->link);
+@@ -903,7 +936,9 @@ wl_event_loop_create(void)
+ 
+ 	wl_priv_signal_init(&loop->destroy_signal);
+ 
++#ifdef HAVE_TIMERFD
+ 	wl_timer_heap_init(&loop->timers, loop);
++#endif
+ 
+ 	return loop;
+ }
+@@ -927,7 +962,9 @@ wl_event_loop_destroy(struct wl_event_loop *loop)
+ 	wl_priv_signal_final_emit(&loop->destroy_signal, loop);
+ 
+ 	wl_event_loop_process_destroy_list(loop);
++#ifdef HAVE_TIMERFD
+ 	wl_timer_heap_release(&loop->timers);
++#endif
+ 	close(loop->epoll_fd);
+ 	free(loop);
+ }
+@@ -1000,7 +1037,9 @@ wl_event_loop_dispatch(struct wl_event_loop *loop, int timeout)
+ 	struct epoll_event ep[32];
+ 	struct wl_event_source *source;
+ 	int i, count;
++#ifdef HAVE_TIMERFD
+ 	bool has_timers = false;
++#endif
+ 	bool use_timeout = timeout > 0;
+ 	struct timespec now;
+ 	struct timespec deadline = {0};
+@@ -1035,6 +1074,7 @@ wl_event_loop_dispatch(struct wl_event_loop *loop, int timeout)
+ 	if (count < 0)
+ 		return -1;
+ 
++#ifdef HAVE_TIMERFD
+ 	for (i = 0; i < count; i++) {
+ 		source = ep[i].data.ptr;
+ 		if (source == &loop->timers.base) {
+@@ -1052,6 +1092,7 @@ wl_event_loop_dispatch(struct wl_event_loop *loop, int timeout)
+ 		if (wl_timer_heap_dispatch(&loop->timers) < 0)
+ 			return -1;
+ 	}
++#endif
+ 
+ 	for (i = 0; i < count; i++) {
+ 		source = ep[i].data.ptr;
+diff --git a/src/meson.build b/src/meson.build
+index b3b9ea57..50517a5e 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -29,7 +29,12 @@ wayland_util_dep = declare_dependency(
+ if get_option('scanner')
+ 	# wayland-scanner
+ 
+-	scanner_deps = [ dependency('expat') ]
++	if host_machine.system() == 'darwin'
++		scanner_deps = [ cc.find_library('expat') ]
++	else
++		scanner_deps = [ dependency('expat') ]
++	endif
++
+ 	scanner_args = [ '-include', 'config.h' ]
+ 
+ 	if get_option('dtd_validation')
+@@ -71,15 +76,13 @@ if get_option('scanner')
+ 		filebase: 'wayland-scanner'
+ 	)
+ 
+-	if meson.can_run_host_binaries()
+-		meson.override_find_program('wayland-scanner', wayland_scanner)
+-		meson.override_dependency('wayland-scanner', declare_dependency(
+-			variables: { 'wayland_scanner': 'wayland-scanner' },
++	meson.override_find_program('wayland-scanner', wayland_scanner)
++	meson.override_dependency('wayland-scanner', declare_dependency(
++		variables: { 'wayland_scanner': 'wayland-scanner' },
+ 		))
+-	endif
+ endif
+ 
+-if meson.is_cross_build() or not get_option('scanner')
++if not get_option('scanner')
+ 	scanner_dep = dependency('wayland-scanner', native: true, version: meson.project_version())
+ 	wayland_scanner_for_build = find_program(scanner_dep.get_variable(pkgconfig: 'wayland_scanner'))
+ else
+@@ -182,6 +185,7 @@ if get_option('libraries')
+ 		# To avoid an unnecessary SONAME bump, wayland 1.x.y produces
+ 		# libwayland-server.so.0.x.y.
+ 		version: '.'.join(['0', wayland_version[1], wayland_version[2]]),
++		darwin_versions: ['2.0.0', '0.@0@.@1@'.format(wayland_version[1], wayland_version[2])],
+ 		dependencies: [
+ 			epoll_dep,
+ 			ffi_dep,
+@@ -233,6 +237,7 @@ if get_option('libraries')
+ 		# To avoid an unnecessary SONAME bump, wayland 1.x.y produces
+ 		# libwayland-client.so.0.x.y.
+ 		version: '.'.join(['0', wayland_version[1], wayland_version[2]]),
++		darwin_versions: ['4.0.0', '0.@0@.@1@'.format(wayland_version[1], wayland_version[2])],
+ 		dependencies: [
+ 			epoll_dep,
+ 			ffi_dep,
+diff --git a/src/wayland-client.c b/src/wayland-client.c
+index 8e5539f4..7be66042 100644
+--- a/src/wayland-client.c
++++ b/src/wayland-client.c
+@@ -41,6 +41,10 @@
+ #include <poll.h>
+ #include <pthread.h>
+ 
++#ifdef __APPLE__
++#include <epoll-shim/detail/poll.h>
++#endif
++
+ #include "wayland-util.h"
+ #include "wayland-os.h"
+ #include "wayland-client.h"
+@@ -1156,7 +1160,7 @@ connect_to_socket(const char *name)
+ {
+ 	struct sockaddr_un addr;
+ 	socklen_t size;
+-	const char *runtime_dir;
++	char *runtime_dir;
+ 	int name_size, fd;
+ 	bool path_is_absolute;
+ 
+@@ -1168,8 +1172,18 @@ connect_to_socket(const char *name)
+ 	path_is_absolute = name[0] == '/';
+ 
+ 	runtime_dir = getenv("XDG_RUNTIME_DIR");
++#ifdef __APPLE__
++	if (((!runtime_dir || runtime_dir[0] != '/') && !path_is_absolute)) {
++		runtime_dir = getenv("TMPDIR");
++		wl_log("Using TMPDIR=\"%s\" instead of XDG_RUNTIME_DIR\n", runtime_dir);
++	}
++#endif
+ 	if (((!runtime_dir || runtime_dir[0] != '/') && !path_is_absolute)) {
++#ifdef __APPLE__
++		wl_log("error: XDG_RUNTIME_DIR and/or TMPDIR are invalid or not set in the environment.\n");
++#else
+ 		wl_log("error: XDG_RUNTIME_DIR is invalid or not set in the environment.\n");
++#endif
+ 		/* to prevent programs reporting
+ 		 * "failed to create display: Success" */
+ 		errno = ENOENT;
+diff --git a/src/wayland-os.c b/src/wayland-os.c
+index f00ead4b..e8fbb7cd 100644
+--- a/src/wayland-os.c
++++ b/src/wayland-os.c
+@@ -75,16 +75,38 @@ wl_os_socket_cloexec(int domain, int type, int protocol)
+ {
+ 	int fd;
+ 
++#ifdef SOCK_CLOEXEC
+ 	fd = wl_socket(domain, type | SOCK_CLOEXEC, protocol);
+ 	if (fd >= 0)
+ 		return fd;
+ 	if (errno != EINVAL)
+ 		return -1;
++#endif
+ 
+ 	fd = wl_socket(domain, type, protocol);
+ 	return set_cloexec_or_close(fd);
+ }
+ 
++int
++wl_os_socketpair_cloexec(int domain, int type, int protocol, int sv[2])
++{
++	int retval;
++
++#ifdef SOCK_CLOEXEC
++	retval = socketpair(domain, type | SOCK_CLOEXEC, protocol, sv);
++	if (retval >= 0)
++		return retval;
++	if (errno != EINVAL)
++		return -1;
++#endif
++
++	retval = socketpair(domain, type, protocol, sv);
++	if (set_cloexec_or_close(sv[0]) == -1 || set_cloexec_or_close(sv[1]) == -1)
++		retval = -1;
++
++	return retval;
++}
++
+ #if defined(__FreeBSD__)
+ int
+ wl_os_socket_peercred(int sockfd, uid_t *uid, gid_t *gid, pid_t *pid)
+@@ -125,6 +147,24 @@ wl_os_socket_peercred(int sockfd, uid_t *uid, gid_t *gid, pid_t *pid)
+ 	*pid = ucred.pid;
+ 	return 0;
+ }
++#elif defined(HAVE_GETPEEREID)
++int
++wl_os_socket_peercred(int sockfd, uid_t *uid, gid_t *gid, pid_t *pid)
++{
++	socklen_t len;
++
++	if (getpeereid(sockfd, uid, gid) != 0) {
++		return -1;
++	}
++
++	len = sizeof(pid_t);
++#ifdef LOCAL_PEERPID
++	if (getsockopt(sockfd, SOL_LOCAL, LOCAL_PEERPID, pid, &len) != 0) {
++		return -1;
++	}
++#endif
++	return 0;
++}
+ #else
+ #error "Don't know how to read ucred on this platform"
+ #endif
+@@ -134,11 +174,13 @@ wl_os_dupfd_cloexec(int fd, int minfd)
+ {
+ 	int newfd;
+ 
++#ifdef F_DUPFD_CLOEXEC
+ 	newfd = wl_fcntl(fd, F_DUPFD_CLOEXEC, minfd);
+ 	if (newfd >= 0)
+ 		return newfd;
+ 	if (errno != EINVAL)
+ 		return -1;
++#endif
+ 
+ 	newfd = wl_fcntl(fd, F_DUPFD, minfd);
+ 	return set_cloexec_or_close(newfd);
+@@ -186,7 +228,7 @@ wl_os_recvmsg_cloexec(int sockfd, struct msghdr *msg, int flags)
+ 	 * fix (https://cgit.freebsd.org/src/commit/?id=6ceacebdf52211).
+ 	 */
+ #pragma message("Using fallback directly since MSG_CMSG_CLOEXEC is broken.")
+-#else
++#elif defined(MSG_CMSG_CLOEXEC)
+ 	ssize_t len;
+ 
+ 	len = wl_recvmsg(sockfd, msg, flags | MSG_CMSG_CLOEXEC);
+diff --git a/src/wayland-os.h b/src/wayland-os.h
+index 068fd2fe..d1317fc0 100644
+--- a/src/wayland-os.h
++++ b/src/wayland-os.h
+@@ -29,9 +29,50 @@
+ #include <sys/types.h>
+ #include <sys/socket.h>
+ 
++/*
++ * In 64-bit builds the 10.5 SDK computes every CMSG_ macro with 8-byte
++ * alignment, padding struct cmsghdr to 16 bytes, while the 32-bit 10.5
++ * kernel lays control messages out with 4-byte alignment (a 12-byte
++ * header), which is also what the 10.6 and later SDKs assume. For
++ * a single fd CMSG_LEN() then yields 20 instead of 16, the kernel reads
++ * two fds -- the real one plus 4 bytes of uninitialized padding -- and
++ * sendmsg() fails with EBADF. MacPorts legacy-support only corrects
++ * CMSG_DATA, so substitute the 10.6 definitions for all of them.
++ */
++#if defined(__APPLE__) && defined(__LP64__)
++#include <AvailabilityMacros.h>
++#if MAC_OS_X_VERSION_MAX_ALLOWED < 1060
++
++#define WL_CMSG_ALIGN32(n) (((size_t)(n) + 3) & ~(size_t)3)
++
++#undef CMSG_DATA
++#undef CMSG_NXTHDR
++#undef CMSG_SPACE
++#undef CMSG_LEN
++
++#define CMSG_DATA(cmsg) \
++	((unsigned char *)(cmsg) + WL_CMSG_ALIGN32(sizeof(struct cmsghdr)))
++#define CMSG_NXTHDR(mhdr, cmsg) \
++	(((unsigned char *)(cmsg) + WL_CMSG_ALIGN32((cmsg)->cmsg_len) + \
++	  WL_CMSG_ALIGN32(sizeof(struct cmsghdr)) > \
++	  (unsigned char *)(mhdr)->msg_control + (mhdr)->msg_controllen) ? \
++	 (struct cmsghdr *)0 : \
++	 (struct cmsghdr *)((unsigned char *)(cmsg) + \
++			    WL_CMSG_ALIGN32((cmsg)->cmsg_len)))
++#define CMSG_SPACE(l) \
++	(WL_CMSG_ALIGN32(sizeof(struct cmsghdr)) + WL_CMSG_ALIGN32(l))
++#define CMSG_LEN(l) \
++	(WL_CMSG_ALIGN32(sizeof(struct cmsghdr)) + (l))
++
++#endif
++#endif
++
+ int
+ wl_os_socket_cloexec(int domain, int type, int protocol);
+ 
++int
++wl_os_socketpair_cloexec(int domain, int type, int protocol, int sv[2]);
++
+ int
+ wl_os_socket_peercred(int sockfd, uid_t *uid, gid_t *gid, pid_t *pid);
+ 
+diff --git a/src/wayland-server.c b/src/wayland-server.c
+index a0e118e8..d251299a 100644
+--- a/src/wayland-server.c
++++ b/src/wayland-server.c
+@@ -1904,14 +1904,25 @@ static int
+ wl_socket_init_for_display_name(struct wl_socket *s, const char *name)
+ {
+ 	int name_size;
+-	const char *runtime_dir = "";
++	char *runtime_dir = "";
+ 	const char *separator = "";
+ 
+ 	if (name[0] != '/') {
+ 		runtime_dir = getenv("XDG_RUNTIME_DIR");
++#ifdef __APPLE__
+ 		if (!runtime_dir || runtime_dir[0] != '/') {
++			runtime_dir = getenv("TMPDIR");
++			wl_log("Using TMPDIR=\"%s\" instead of XDG_RUNTIME_DIR\n", runtime_dir);
++		}
++#endif
++		if (!runtime_dir || runtime_dir[0] != '/') {
++#ifdef __APPLE__
++			wl_log("error: XDG_RUNTIME_DIR and/or TMPDIR are invalid"
++			       " or not set in the environment\n");
++#else
+ 			wl_log("error: XDG_RUNTIME_DIR is invalid or not set in"
+ 			       " the environment\n");
++#endif
+ 
+ 			/* to prevent programs reporting
+ 			 * "failed to add socket: Success" */
+diff --git a/src/wayland-shm.c b/src/wayland-shm.c
+index 3ac4add2..22551b79 100644
+--- a/src/wayland-shm.c
++++ b/src/wayland-shm.c
+@@ -30,7 +30,7 @@
+ 
+ #define _GNU_SOURCE
+ 
+-#include "config.h"
++#include "../config.h"
+ 
+ #include <stdbool.h>
+ #include <stdio.h>
+@@ -357,8 +357,10 @@ shm_create_pool(struct wl_client *client, struct wl_resource *resource,
+ 		uint32_t id, int fd, int32_t size)
+ {
+ 	struct wl_shm_pool *pool;
++#ifdef HAVE_MEMFD_CREATE
+ 	struct stat statbuf;
+ 	int seals;
++#endif
+ 	int prot;
+ 	int flags;
+ 	uint32_t version;
+diff --git a/tests/client-test.c b/tests/client-test.c
+index 5585c0cd..83bdead6 100644
+--- a/tests/client-test.c
++++ b/tests/client-test.c
+@@ -34,6 +34,7 @@
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ 
++#include "wayland-os.h"
+ #include "wayland-private.h"
+ #include "wayland-server.h"
+ #include "test-runner.h"
+@@ -97,7 +98,7 @@ TEST(client_destroy_listener)
+ 	bool user_data_destroyed = false;
+ 	int s[2];
+ 
+-	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, s) == 0);
++	assert(wl_os_socketpair_cloexec(AF_UNIX, SOCK_STREAM, 0, s) == 0);
+ 	display = wl_display_create();
+ 	assert(display);
+ 	client = wl_client_create(display, s[0]);
+@@ -184,7 +185,7 @@ TEST(client_destroy_removes_link)
+ 	struct client_destroy_listener destroy_listener;
+ 	int s[2];
+ 
+-	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, s) == 0);
++	assert(wl_os_socketpair_cloexec(AF_UNIX, SOCK_STREAM, 0, s) == 0);
+ 	display = wl_display_create();
+ 	assert(display);
+ 	client = wl_client_create(display, s[0]);
+diff --git a/tests/compositor-introspection-test.c b/tests/compositor-introspection-test.c
+index 064d2530..11f81e8f 100644
+--- a/tests/compositor-introspection-test.c
++++ b/tests/compositor-introspection-test.c
+@@ -40,7 +40,14 @@ static const char *
+ require_xdg_runtime_dir(void)
+ {
+ 	char *val = getenv("XDG_RUNTIME_DIR");
++#ifdef __APPLE__
++	if (!val || val[0] != '/') {
++		val = getenv("TMPDIR");
++	}
++	assert(val && val[0] == '/' && "set $XDG_RUNTIME_DIR or $TMPDIR to run this test");
++#else
+ 	assert(val && val[0] == '/' && "set $XDG_RUNTIME_DIR to run this test");
++#endif
+ 
+ 	return val;
+ }
+diff --git a/tests/connection-test.c b/tests/connection-test.c
+index aed97a0a..753091c6 100644
+--- a/tests/connection-test.c
++++ b/tests/connection-test.c
+@@ -37,6 +37,7 @@
+ #include <sys/stat.h>
+ #include <poll.h>
+ 
++#include "wayland-os.h"
+ #include "wayland-private.h"
+ #include "test-runner.h"
+ #include "test-compositor.h"
+@@ -48,7 +49,7 @@ setup(int *s)
+ {
+ 	struct wl_connection *connection;
+ 
+-	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, s) == 0);
++	assert(wl_os_socketpair_cloexec(AF_UNIX, SOCK_STREAM, 0, s) == 0);
+ 
+ 	connection = wl_connection_create(s[0], WL_BUFFER_DEFAULT_MAX_SIZE);
+ 	assert(connection);
+@@ -181,8 +182,8 @@ struct marshal_data {
+ static void
+ setup_marshal_data(struct marshal_data *data)
+ {
+-	assert(socketpair(AF_UNIX,
+-			  SOCK_STREAM | SOCK_CLOEXEC, 0, data->s) == 0);
++	assert(wl_os_socketpair_cloexec(AF_UNIX,
++			  SOCK_STREAM, 0, data->s) == 0);
+ 	data->read_connection = wl_connection_create(data->s[0],
+ 						     WL_BUFFER_DEFAULT_MAX_SIZE);
+ 	assert(data->read_connection);
+@@ -885,7 +886,7 @@ TEST(request_bogus_size)
+ 	for (bogus_size = 11; bogus_size >= 0; bogus_size--) {
+ 		fprintf(stderr, "* bogus size %d\n", bogus_size);
+ 
+-		assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, s) == 0);
++		assert(wl_os_socketpair_cloexec(AF_UNIX, SOCK_STREAM, 0, s) == 0);
+ 		display = wl_display_create();
+ 		assert(display);
+ 		client = wl_client_create(display, s[0]);
+diff --git a/tests/event-loop-test.c b/tests/event-loop-test.c
+index be15a34e..23804d0e 100644
+--- a/tests/event-loop-test.c
++++ b/tests/event-loop-test.c
+@@ -25,6 +25,9 @@
+  */
+ 
+ #define _GNU_SOURCE
++
++#include "../config.h"
++
+ #include <stdlib.h>
+ #include <stdint.h>
+ #include <assert.h>
+@@ -148,6 +151,8 @@ TEST(event_loop_free_source_with_data)
+ 	assert(close(context.p2[1]) == 0);
+ }
+ 
++#ifdef HAVE_SIGNALFD
++
+ static int
+ signal_callback(int signal_number, void *data)
+ {
+@@ -238,6 +243,10 @@ TEST(event_loop_multiple_same_signals)
+ 	wl_event_loop_destroy(loop);
+ }
+ 
++#endif /* HAVE_SIGNALFD */
++
++#ifdef HAVE_TIMERFD
++
+ #define MSEC_TO_USEC(msec) ((msec) * 1000)
+ 
+ struct timer_update_context {
+@@ -456,6 +465,8 @@ TEST(event_loop_timer_cancellation)
+ 	wl_event_loop_destroy(loop);
+ }
+ 
++#endif /* HAVE_TIMERFD */
++
+ struct event_loop_destroy_listener {
+ 	struct wl_listener listener;
+ 	int done;
+diff --git a/tests/os-wrappers-test.c b/tests/os-wrappers-test.c
+index 061d29e6..40abf48a 100644
+--- a/tests/os-wrappers-test.c
++++ b/tests/os-wrappers-test.c
+@@ -61,10 +61,12 @@ socket_wrapper(int domain, int type, int protocol)
+ {
+ 	wrapped_calls_socket++;
+ 
++#ifdef SOCK_CLOEXEC
+ 	if (fall_back && (type & SOCK_CLOEXEC)) {
+ 		errno = EINVAL;
+ 		return -1;
+ 	}
++#endif
+ 
+ 	return socket(domain, type, protocol);
+ }
+@@ -78,12 +80,16 @@ fcntl_wrapper(int fd, int cmd, ...)
+ 
+ 	wrapped_calls_fcntl++;
+ 
++#ifdef F_DUPFD_CLOEXEC
+ 	if (fall_back && (cmd == F_DUPFD_CLOEXEC)) {
+ 		errno = EINVAL;
+ 		return -1;
+ 	}
++#endif
+ 	switch (cmd) {
++#ifdef F_DUPFD_CLOEXEC
+ 	case F_DUPFD_CLOEXEC:
++#endif
+ 	case F_DUPFD:
+ 	case F_SETFD:
+ 		va_start(ap, cmd);
+@@ -110,10 +116,12 @@ recvmsg_wrapper(int sockfd, struct msghdr *msg, int flags)
+ {
+ 	wrapped_calls_recvmsg++;
+ 
++#ifdef MSG_CMSG_CLOEXEC
+ 	if (fall_back && (flags & MSG_CMSG_CLOEXEC)) {
+ 		errno = EINVAL;
+ 		return -1;
+ 	}
++#endif
+ 
+ 	return recvmsg(sockfd, msg, flags);
+ }
+@@ -158,7 +166,11 @@ do_os_wrappers_socket_cloexec(int n)
+ 	 * Must have 2 calls if falling back, but must also allow
+ 	 * falling back without a forced fallback.
+ 	 */
++#ifdef SOCK_CLOEXEC
+ 	assert(wrapped_calls_socket > n);
++#else
++	assert(wrapped_calls_socket == 1);
++#endif
+ 
+ 	exec_fd_leak_check(nr_fds);
+ }
+@@ -232,8 +244,8 @@ struct marshal_data {
+ static void
+ setup_marshal_data(struct marshal_data *data)
+ {
+-	assert(socketpair(AF_UNIX,
+-			  SOCK_STREAM | SOCK_CLOEXEC, 0, data->s) == 0);
++	assert(wl_os_socketpair_cloexec(AF_UNIX,
++			  SOCK_STREAM, 0, data->s) == 0);
+ 
+ 	data->read_connection = wl_connection_create(data->s[0],
+ 						     WL_BUFFER_DEFAULT_MAX_SIZE);
+@@ -323,9 +335,10 @@ do_os_wrappers_recvmsg_cloexec(int n)
+ 	struct marshal_data data;
+ 
+ 	data.nr_fds_begin = count_open_fds();
+-#if HAVE_BROKEN_MSG_CMSG_CLOEXEC
++#if HAVE_BROKEN_MSG_CMSG_CLOEXEC || !defined(MSG_CMSG_CLOEXEC)
+ 	/* We call the fallback directly on FreeBSD versions with a broken
+-	 * MSG_CMSG_CLOEXEC, so we don't call the local recvmsg() wrapper. */
++	 * MSG_CMSG_CLOEXEC or platforms without MSG_CMSG_CLOEXEC, so we
++         * don't call the local recvmsg() wrapper. */
+ 	data.wrapped_calls = 0;
+ #else
+ 	data.wrapped_calls = n;
+diff --git a/tests/protocol-logger-test.c b/tests/protocol-logger-test.c
+index a0ebd22a..7748b685 100644
+--- a/tests/protocol-logger-test.c
++++ b/tests/protocol-logger-test.c
+@@ -40,7 +40,14 @@ static const char *
+ require_xdg_runtime_dir(void)
+ {
+ 	char *val = getenv("XDG_RUNTIME_DIR");
++#ifdef __APPLE__
++	if (!val || val[0] != '/') {
++		val = getenv("TMPDIR");
++	}
++	assert(val && val[0] == '/' && "set $XDG_RUNTIME_DIR or $TMPDIR to run this test");
++#else
+ 	assert(val && val[0] == '/' && "set $XDG_RUNTIME_DIR to run this test");
++#endif
+ 
+ 	return val;
+ }
+diff --git a/tests/queue-test.c b/tests/queue-test.c
+index 2b2d9ad4..518a4618 100644
+--- a/tests/queue-test.c
++++ b/tests/queue-test.c
+@@ -42,6 +42,23 @@
+ #include "test-compositor.h"
+ #include "../src/timespec-util.h"
+ 
++#ifdef __APPLE__
++static void *
++memrchr(const void *s, int c, size_t n)
++{
++    const unsigned char *cp;
++
++    if (n != 0) {
++        cp = (unsigned char *)s + n;
++        do {
++            if (*(--cp) == (unsigned char)c)
++                return (void *)cp;
++        } while (--n != 0);
++    }
++    return (void *)0;
++}
++#endif
++
+ #define ARRAY_LENGTH(a) (sizeof (a) / sizeof (a)[0])
+ 
+ static void
+diff --git a/tests/resources-test.c b/tests/resources-test.c
+index 92707297..5a01785a 100644
+--- a/tests/resources-test.c
++++ b/tests/resources-test.c
+@@ -28,6 +28,7 @@
+ #include <unistd.h>
+ #include <stdint.h>
+ 
++#include "wayland-os.h"
+ #include "wayland-server.h"
+ #include "test-runner.h"
+ 
+@@ -40,7 +41,7 @@ TEST(create_resource_tst)
+ 	int s[2];
+ 	uint32_t id;
+ 
+-	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, s) == 0);
++	assert(wl_os_socketpair_cloexec(AF_UNIX, SOCK_STREAM, 0, s) == 0);
+ 	display = wl_display_create();
+ 	assert(display);
+ 	client = wl_client_create(display, s[0]);
+@@ -111,7 +112,7 @@ TEST(destroy_res_tst)
+ 		.notify = &destroy_notify
+ 	};
+ 
+-	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, s) == 0);
++	assert(wl_os_socketpair_cloexec(AF_UNIX, SOCK_STREAM, 0, s) == 0);
+ 	display = wl_display_create();
+ 	assert(display);
+ 	client = wl_client_create(display, s[0]);
+@@ -159,7 +160,7 @@ TEST(create_resource_with_same_id)
+ 	int s[2];
+ 	uint32_t id;
+ 
+-	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, s) == 0);
++	assert(wl_os_socketpair_cloexec(AF_UNIX, SOCK_STREAM, 0, s) == 0);
+ 	display = wl_display_create();
+ 	assert(display);
+ 	client = wl_client_create(display, s[0]);
+@@ -243,7 +244,7 @@ TEST(resource_destroy_iteration)
+ 		.notify = &resource_destroy_notify
+ 	};
+ 
+-	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, s) == 0);
++	assert(wl_os_socketpair_cloexec(AF_UNIX, SOCK_STREAM, 0, s) == 0);
+ 	display = wl_display_create();
+ 	assert(display);
+ 	client = wl_client_create(display, s[0]);
+diff --git a/tests/socket-test.c b/tests/socket-test.c
+index 78743dc3..81df9a6b 100644
+--- a/tests/socket-test.c
++++ b/tests/socket-test.c
+@@ -51,7 +51,14 @@ static const char *
+ require_xdg_runtime_dir(void)
+ {
+ 	char *val = getenv("XDG_RUNTIME_DIR");
++#ifdef __APPLE__
++	if (!val || val[0] != '/') {
++		val = getenv("TMPDIR");
++	}
++	assert(val && val[0] == '/' && "set $XDG_RUNTIME_DIR or $TMPDIR to run this test");
++#else
+ 	assert(val && val[0] == '/' && "set $XDG_RUNTIME_DIR to run this test");
++#endif
+ 
+ 	return val;
+ }
+diff --git a/tests/test-runner.c b/tests/test-runner.c
+index 9a50d1dd..355f3744 100644
+--- a/tests/test-runner.c
++++ b/tests/test-runner.c
+@@ -63,7 +63,12 @@ static int timeouts_enabled = 1;
+ /* set to one if the output goes to the terminal */
+ static int is_atty = 0;
+ 
++#ifdef __APPLE__
++extern const struct test __start_test_section __asm("section$start$__RODATA$test_section");
++extern const struct test __stop_test_section __asm("section$end$__RODATA$test_section");
++#else
+ extern const struct test __start_test_section, __stop_test_section;
++#endif
+ 
+ static const struct test *
+ find_test(const char *name)
+@@ -199,8 +204,15 @@ set_xdg_runtime_dir(void)
+ static void
+ rmdir_xdg_runtime_dir(void)
+ {
+-	const char *xrd_env = getenv("XDG_RUNTIME_DIR");
++	char *xrd_env = getenv("XDG_RUNTIME_DIR");
++#ifdef __APPLE__
++	if (!xrd_env || xrd_env[0] != '/') {
++		xrd_env = getenv("TMPDIR");
++	}
++	assert(xrd_env && xrd_env[0] == '/' && "No XDG_RUNTIME_DIR nor TMPDIR set");
++#else
+ 	assert(xrd_env && xrd_env[0] == '/' && "No XDG_RUNTIME_DIR set");
++#endif
+ 
+ 	/* rmdir may fail if some test didn't do clean up */
+ 	if (rmdir(xrd_env) == -1)
+diff --git a/tests/test-runner.h b/tests/test-runner.h
+index d0734009..2024fa13 100644
+--- a/tests/test-runner.h
++++ b/tests/test-runner.h
+@@ -31,6 +31,12 @@
+ 
+ #include <unistd.h>
+ 
++#ifdef __APPLE__
++#define TEST_SECTION "__RODATA,test_section"
++#else
++#define TEST_SECTION "test_section"
++#endif
++
+ struct test {
+ 	const char *name;
+ 	void (*run)(void);
+@@ -41,7 +47,7 @@ struct test {
+ 	static void name(void);						\
+ 									\
+ 	const struct test test##name					\
+-		 __attribute__ ((used, section ("test_section"))) = {	\
++		 __attribute__ ((used, section (TEST_SECTION))) = {	\
+ 		#name, name, 0						\
+ 	};								\
+ 									\
+@@ -51,7 +57,7 @@ struct test {
+ 	static void name(void);						\
+ 									\
+ 	const struct test test##name					\
+-		 __attribute__ ((used, section ("test_section"))) = {	\
++		 __attribute__ ((used, section (TEST_SECTION))) = {	\
+ 		#name, name, 1						\
+ 	};								\
+ 									\

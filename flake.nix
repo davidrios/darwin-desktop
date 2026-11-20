@@ -1,0 +1,54 @@
+{
+  description = "Darwin Wayland desktop: a Hyprland-style Wayland session on Apple Silicon macOS";
+
+  inputs = {
+    # Pinned exactly through flake.lock. Update deliberately with `nix flake update`.
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  };
+
+  outputs =
+    { self, nixpkgs }:
+    let
+      # Apple Silicon only, by design (see docs/PROJECT_OUTLINE.md).
+      system = "aarch64-darwin";
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [ self.overlays.default ];
+      };
+      dw = pkgs.darwinWayland;
+    in
+    {
+      overlays.default = import ./nix/overlay.nix;
+
+      packages.${system} = {
+        inherit (dw) wayland wl-spike;
+        default = dw.wl-spike;
+      };
+
+      checks.${system} = {
+        wl-spike = dw.wl-spike-test;
+      };
+
+      devShells.${system}.default = pkgs.mkShell {
+        name = "darwin-desktop";
+        packages = [
+          dw.wayland
+          dw.wayland-scanner
+          dw.wayland-protocols
+          pkgs.epoll-shim
+          pkgs.pkg-config
+          pkgs.meson
+          pkgs.ninja
+          pkgs.cmake
+        ];
+        shellHook = ''
+          # libwayland falls back to TMPDIR when XDG_RUNTIME_DIR is unset (Darwin patch),
+          # but a dedicated directory keeps sockets tidy.
+          export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-''${TMPDIR%/}/darwin-desktop-runtime}"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+        '';
+      };
+
+      formatter.${system} = pkgs.nixfmt-rfc-style;
+    };
+}
