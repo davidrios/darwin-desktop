@@ -2,9 +2,9 @@
 
 ## Status (2026-11-20)
 
-**Exit criterion met outside Nix:** a Wayland server and a wl_shm client talk on macOS 26.7.3 (arm64). The client fills a POSIX shm buffer, the server maps the passed fd and sees the same checksum. Spike: `spikes/m0-wayland/`.
+**Exit criterion met, under Nix:** a Wayland server and a wl_shm client talk on macOS 26.7.3 (arm64). The client fills a POSIX shm buffer, the server maps the passed fd and sees the same checksum. Spike: `spikes/m0-wayland/`. `nix flake check` builds patched libwayland (25/25 test suites pass in the sandbox), the spike, and runs the pair. Only libwayland and the spike build locally; everything else comes from the binary cache.
 
-Built by hand (Homebrew meson/ninja/cmake, macOS SDK libffi/expat, epoll-shim 0.0.20240608 from source) because Nix was not installed yet. The Nix build (`nix flake check`) is written but not yet run.
+First verified by a manual build (Homebrew meson/ninja/cmake, macOS SDK libffi/expat, epoll-shim from source) before Nix was installed; same result.
 
 ## Package availability in nixpkgs (nixpkgs-unstable, checked 2026-11-20)
 
@@ -16,7 +16,7 @@ Built by hand (Homebrew meson/ninja/cmake, macOS SDK libffi/expat, epoll-shim 0.
 | epoll-shim 0.0.20240608 | Yes | Its own tests are disabled on Darwin in nixpkgs (upstream issue 41). |
 | libinotify-kqueue | Yes | For Hyprland's config watcher (Track 1) if needed. |
 | pixman, cairo, pango | Yes | cairo/pango without Wayland involvement anyway. |
-| libxkbcommon | Not checked yet | Defined in all-packages as `libxkbcommon_8`. |
+| libxkbcommon 1.13.2 | Yes | Built with `-Denable-wayland=false`, which only drops the `xkbcli` Wayland tools; the library is usable as is. |
 | hyprutils, hyprgraphics | No: linux + freebsd | Probably easy: FreeBSD already allowed. |
 | hyprcursor, hyprwayland-scanner, hyprland-protocols | No: linux only | hyprland-protocols is just XML; hyprwayland-scanner is a code generator. |
 
@@ -39,6 +39,5 @@ The hypr* libraries matter mainly for Track 1. On Track 2 only hyprland-protocol
 
 ## Next
 
-1. Install Nix, run `nix flake check` and `nix develop`; record anything that differs from the manual build.
-2. GTK 4 Wayland backend on Darwin: the go/no-go test for apps (outline section 10, item 2).
-3. Cocoa-Way: build, run and read it (Track 2).
+1. GTK 4 Wayland backend on Darwin: the go/no-go test for apps (outline section 10, item 2).
+2. Cocoa-Way: build, run and read it (Track 2).
