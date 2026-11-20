@@ -39,5 +39,5 @@ The hypr* libraries matter mainly for Track 1. On Track 2 only hyprland-protocol
 
 ## Next
 
-1. GTK 4 Wayland backend on Darwin: the go/no-go test for apps (outline section 10, item 2).
-2. Cocoa-Way: build, run and read it (Track 2).
+1. ~~GTK 4 Wayland backend on Darwin~~: go, see `gtk4-notes.md`.
+2. Cocoa-Way: built and running (used as the test compositor for GTK); next, read how it wires Smithay, Metal and AppKit input (Track 2).

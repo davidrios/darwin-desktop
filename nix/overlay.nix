@@ -13,6 +13,13 @@ final: prev: {
     # Unpatched nixpkgs builds already work on Darwin; re-exported for one place to look.
     inherit (prev) wayland-scanner wayland-protocols;
 
+    linux-input-headers = self.callPackage ./pkgs/linux-input-headers.nix { };
+    # Imported, not callPackage'd: gtk4 calls libepoxy.override { x11Support = ...; },
+    # which must stay nixpkgs' own override.
+    libepoxy = import ./pkgs/libepoxy.nix { inherit (prev) libepoxy libglvnd; };
+    gtk4 = self.callPackage ./pkgs/gtk4.nix { inherit (prev) gtk4; };
+    gtk4-demos = self.callPackage ./pkgs/gtk4-demos.nix { };
+
     wl-spike = self.callPackage ../spikes/m0-wayland { };
     wl-spike-test = self.callPackage ../spikes/m0-wayland/test.nix { };
   });

@@ -21,7 +21,13 @@
       overlays.default = import ./nix/overlay.nix;
 
       packages.${system} = {
-        inherit (dw) wayland wl-spike;
+        inherit (dw)
+          wayland
+          wl-spike
+          libepoxy
+          gtk4
+          gtk4-demos
+          ;
         default = dw.wl-spike;
       };
 

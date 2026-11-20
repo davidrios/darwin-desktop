@@ -1,0 +1,29 @@
+--- a/gdk/wayland/gdkapplaunchcontext-wayland.c
++++ b/gdk/wayland/gdkapplaunchcontext-wayland.c
+@@ -23,7 +23,10 @@
+ #include <unistd.h>
+ 
+ #include <glib.h>
++#ifndef __APPLE__
++/* GLib on Darwin has no GDesktopAppInfo (it uses GOsxAppInfo). */
+ #include <gio/gdesktopappinfo.h>
++#endif
+ 
+ #include "gdkwayland.h"
+ #include "gdkdisplay-wayland.h"
+@@ -73,6 +76,7 @@
+ {
+   const char *id;
+ 
++#ifndef __APPLE__
+   /* For Flatpak, it's directly written in the desktop file */
+   if (G_IS_DESKTOP_APP_INFO (info))
+     {
+@@ -80,6 +84,7 @@
+       if (id)
+         return (char *) id;
+     }
++#endif
+ 
+   /* We could look at g_desktop_app_info_get_startup_wm_class here.
+    * However it appears that generally the desktop ID is more likely

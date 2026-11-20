@@ -57,7 +57,7 @@ Size of what Track 2 replaces, measured in Hyprland 0.57.0 `src/`: protocols 26k
 
 **Recommendation for Track 2: do not rewrite the Wayland protocol layer.** That is the largest and least interesting part. Build on an existing protocol library and write only what is specific to this project:
 
-- Smithay (Rust) is the leading candidate. Cocoa-Way already runs a Smithay compositor on macOS as an ordinary app, which proves the base works. Its README lists Metal rendering; older descriptions say OpenGL, so check the current state. Cocoa-Way is GPL-3.0, so forking it fixes the licence; studying it and starting fresh on Smithay does not.
+- Smithay (Rust) is the leading candidate. Cocoa-Way already runs a Smithay compositor on macOS as an ordinary app, which proves the base works. Its README lists Metal rendering; older descriptions say OpenGL, so check the current state. Checked 2026-11-20 (v2.1.3): it renders with Metal (`objc2-metal`, CAMetalLayer) and uses a vendored Smithay with the pure-Rust `wayland-backend`, so it needs no libwayland. Cocoa-Way is GPL-3.0, so forking it fixes the licence; studying it and starting fresh on Smithay does not.
 - New code: Metal renderer (borders, rounding, shadows, blur, animations as Metal shaders), IOSurface buffer handling, Darwin input, Hyprland-style layouts (dwindle, master), workspaces, keybinds, rules.
 - Decide early how compatible to be: read a subset of `hyprland.conf`, or define a new config format.
 
@@ -216,7 +216,7 @@ These came from memory or inference and were not checked:
 - Is presenting an IOSurface as layer contents fast enough and tear-free at 120 Hz, or is a CAMetalLayer blit needed?
 - Which of the M0 packages does nixpkgs already build for Darwin (wayland, epoll-shim, xkbcommon, the hypr* libraries), and which are marked Linux-only?
 - Does libwayland build cleanly on current macOS with epoll-shim? A Hyprland maintainer thread from April 2025 says Wayland itself builds on Darwin.
-- State of GTK 4 and Qt 6 Wayland backends on Darwin (Owl and MacPorts work from 2024 is the lead).
+- State of GTK 4 and Qt 6 Wayland backends on Darwin (Owl and MacPorts work from 2024 is the lead). GTK 4 answered (2026-11-20): GTK 4.24 builds with only the Wayland backend and runs under Cocoa-Way after small patches; see `gtk4-notes.md`. Qt 6 still open.
 - Can kiosk mode capture every system gesture and shortcut, or do some need to be disabled in settings? Partly answered (2026-11-20): keyboard shortcuts are captured the 2ksbox way, `CGSSetGlobalHotKeyOperatingMode` (see `decisions.md`). Universal Access chords, Cmd+Opt+Esc and the fn/media keys stay the host's. Still open: trackpad system gestures (Mission Control swipes, App Exposé), and whether the hot key mode survives a compositor crash.
 - M5: does macOS boot and stay stable with WindowServer disabled on Apple Silicon? What does the private framebuffer interface require from its client?
 - M5: how low can idle memory go with services stripped? The 3 to 4 GB mentioned earlier was a guess, not a measurement.

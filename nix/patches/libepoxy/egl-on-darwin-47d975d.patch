@@ -1,0 +1,34 @@
+From upstream libepoxy commit 47d975d726 (2025-10-29, "Improve library detections"),
+src/ hunks only: enable EGL on Apple and load libEGL.dylib. The meson.build
+hunk (Qt 5 detection) is dropped; it does not apply to 1.5.10 and is not needed.
+
+diff --git a/src/dispatch_common.c b/src/dispatch_common.c
+index 9f3dac46..3ba9b0f1 100644
+--- a/src/dispatch_common.c
++++ b/src/dispatch_common.c
+@@ -175,9 +175,10 @@
+ 
+ #if defined(__APPLE__)
+ #define GLX_LIB "/opt/X11/lib/libGL.1.dylib"
++#define EGL_LIB "libEGL.dylib"
+ #define OPENGL_LIB "/System/Library/Frameworks/OpenGL.framework/Versions/Current/OpenGL"
+-#define GLES1_LIB "libGLESv1_CM.so"
+-#define GLES2_LIB "libGLESv2.so"
++#define GLES1_LIB "libGLESv1_CM.dylib"
++#define GLES2_LIB "libGLESv2.dylib"
+ #elif defined(__ANDROID__)
+ #define GLX_LIB "libGLESv2.so"
+ #define EGL_LIB "libEGL.so"
+diff --git a/src/dispatch_common.h b/src/dispatch_common.h
+index a1369431..55388a82 100644
+--- a/src/dispatch_common.h
++++ b/src/dispatch_common.h
+@@ -28,7 +28,7 @@
+ #define PLATFORM_HAS_GLX ENABLE_GLX
+ #define PLATFORM_HAS_WGL 1
+ #elif defined(__APPLE__)
+-#define PLATFORM_HAS_EGL 0 
++#define PLATFORM_HAS_EGL ENABLE_EGL
+ #define PLATFORM_HAS_GLX ENABLE_GLX
+ #define PLATFORM_HAS_WGL 0
+ #elif defined(ANDROID)
