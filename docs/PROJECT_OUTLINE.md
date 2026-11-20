@@ -217,7 +217,7 @@ These came from memory or inference and were not checked:
 - Which of the M0 packages does nixpkgs already build for Darwin (wayland, epoll-shim, xkbcommon, the hypr* libraries), and which are marked Linux-only?
 - Does libwayland build cleanly on current macOS with epoll-shim? A Hyprland maintainer thread from April 2025 says Wayland itself builds on Darwin.
 - State of GTK 4 and Qt 6 Wayland backends on Darwin (Owl and MacPorts work from 2024 is the lead).
-- Can kiosk mode capture every system gesture and shortcut, or do some need to be disabled in settings?
+- Can kiosk mode capture every system gesture and shortcut, or do some need to be disabled in settings? Partly answered (2026-11-20): keyboard shortcuts are captured the 2ksbox way, `CGSSetGlobalHotKeyOperatingMode` (see `decisions.md`). Universal Access chords, Cmd+Opt+Esc and the fn/media keys stay the host's. Still open: trackpad system gestures (Mission Control swipes, App Exposé), and whether the hot key mode survives a compositor crash.
 - M5: does macOS boot and stay stable with WindowServer disabled on Apple Silicon? What does the private framebuffer interface require from its client?
 - M5: how low can idle memory go with services stripped? The 3 to 4 GB mentioned earlier was a guess, not a measurement.
 - Does the paravirtual GPU in a macOS VM support Metal 4? Relevant only if KosmicKrisp is used in a VM.
