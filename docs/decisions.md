@@ -56,9 +56,10 @@ Newest first. Each entry: what was decided, why, and what it implies. Earlier de
 
 **What stays the host's even when captured:** Universal Access chords, Cmd+Opt+Esc (Force Quit) and the fn / media keys. That's acceptable in Stage A: brightness and volume should keep working through macOS anyway. Stage B (M5) reads IOHID directly and has no window server to fight.
 
-**To verify early (M1):**
-- Whether the mode is restored by the window server when the process dies without restoring it (crash, `kill -9`). If not, a crashed compositor leaves the Mac without Cmd+Tab until something resets it; the session launcher must restore the saved mode after the compositor exits.
-- Whether Cmd+Shift+Q (Apple menu "Log Out", see below) is covered by the hot key mode or needs the presentation options too.
+**Verified (2026-11-21, `compositor/src/capture.rs`):**
+- The window server restores the mode when the process that set it exits, even after `kill -9` or an exit without restoring. A crashed compositor can't leave the Mac without Cmd+Tab; no launcher-side restore is needed.
+- With capture on, Cmd+Tab, Cmd+Space, Cmd+Shift+3/4 and Ctrl+arrows reach clients as key events (checked by hand, key log). Capture is released when the window loses key status and taken again when it regains it.
+- Cmd+Shift+Q reaches the compositor's key monitor before any menu, so it quits without a logout prompt; the Apple menu option isn't needed for it.
 
 ## 2026-11-20: Cmd+Shift+Q leaves the session
 

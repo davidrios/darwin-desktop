@@ -23,6 +23,7 @@ cd compositor && cargo run -- $(nix build --no-link --print-out-paths ..#gtk4-de
 | Frames | `app.rs` | `NSView`'s `CADisplayLink` (display refresh rate). Each tick: follow window size/scale, redraw if anything committed, send frame callbacks, refresh the space. |
 | Renderer | `render.rs` | Layer-hosting view on a `CAMetalLayer` (BGRA8). Each surface's shm buffer is uploaded to a texture when its commit counter changes (cached in the surface's data map) and drawn as a quad; premultiplied blending; XRGB forces alpha 1. Subsurfaces and popups placed as Smithay's own renderer does. |
 | Keyboard | `input.rs`, `keymap.rs` | A local `NSEvent` monitor takes key down/up and flags changed for our window (AppKit sends no keyUp while Cmd is held; mitsuami does the same). macOS key codes to evdev (table generated from mitsuami-core's tables). Modifiers from the device-dependent flag bits; Caps Lock as press+release; held keys released when the window loses key status. xkb keymap is libxkbcommon's default (us). |
+| Keyboard capture | `capture.rs` | While the window is key, the window server's hot key mode is "all disabled but Universal Access" (`CGSSetGlobalHotKeyOperatingMode`, looked up with `dlsym`), restored when it isn't; presentation options as fallback. `--no-capture` turns it off. Key events log at `RUST_LOG=compositor::input=debug`. |
 | Pointer | `app.rs`, `input.rs` | View's mouse events in flipped view coordinates (= Wayland logical); buttons to `BTN_*`; precise scrolling as finger axis with stop at gesture end, wheel as v120. |
 | Output | `state.rs` | One `wl_output` = the view: logical size in points, integer scale from `backingScaleFactor`, refresh from the screen's `maximumFramesPerSecond`. |
 
@@ -31,7 +32,6 @@ cd compositor && cargo run -- $(nix build --no-link --print-out-paths ..#gtk4-de
 - **Cursor:** client cursor surfaces and cursor-shape are ignored; the macOS arrow shows everywhere.
 - **Clipboard:** only between Wayland clients; no bridge to the macOS pasteboard.
 - **Text input:** no input methods, dead keys or compose; keymap fixed to xkb's default `us`.
-- **Keyboard capture:** Cmd+Tab and other system shortcuts still go to macOS (the 2ksbox hot key mode, `decisions.md`).
 - **Damage:** every frame with a commit re-uploads changed buffers whole and redraws everything.
 - **Scale:** integer output scale only; no fractional-scale or viewporter protocols.
 - **Smithay logs `surface missing from known popups`** when GTK commits a surface whose `xdg_popup` is already gone (GTK keeps the `wl_surface` when hiding a popover). Harmless so far; check against upstream Smithay.

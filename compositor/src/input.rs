@@ -36,6 +36,7 @@ impl Keys {
         if !changed && !pressed {
             return; // a release for a press we never sent
         }
+        tracing::debug!(evdev, pressed, "key");
         let Some(keyboard) = state.seat.get_keyboard() else { return };
         let key_state = if pressed { KeyState::Pressed } else { KeyState::Released };
         keyboard.input::<(), _>(

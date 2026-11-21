@@ -4,9 +4,10 @@
 //! window drawn with Metal, Wayland clients composited into it, keyboard and
 //! pointer forwarded from AppKit. Smithay handles the protocol state.
 //!
-//! Usage: compositor [--fullscreen] [-- client-command args...]
+//! Usage: compositor [--fullscreen] [--no-capture] [-- client-command args...]
 
 mod app;
+mod capture;
 mod input;
 mod keymap;
 mod render;
@@ -19,6 +20,8 @@ use tracing_subscriber::EnvFilter;
 
 pub struct Options {
     pub fullscreen: bool,
+    /// Take the system's shortcuts (Cmd+Tab, Cmd+Space, ...) while our window is key.
+    pub capture: bool,
     /// A client to start once the socket is up, with WAYLAND_DISPLAY set.
     pub command: Vec<OsString>,
 }
@@ -28,7 +31,7 @@ fn main() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    let mut options = Options { fullscreen: false, command: Vec::new() };
+    let mut options = Options { fullscreen: false, capture: true, command: Vec::new() };
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -37,9 +40,11 @@ fn main() {
                 break;
             }
             Some("--fullscreen") => options.fullscreen = true,
+            Some("--no-capture") => options.capture = false,
             Some("-h" | "--help") => {
-                println!("usage: compositor [--fullscreen] [-- client-command args...]");
-                println!("Cmd+Shift+Q quits.");
+                println!("usage: compositor [--fullscreen] [--no-capture] [-- client-command args...]");
+                println!("Cmd+Shift+Q quits. While the window is focused, system shortcuts");
+                println!("(Cmd+Tab, Cmd+Space, Ctrl+arrows...) go to clients unless --no-capture.");
                 return;
             }
             _ => {

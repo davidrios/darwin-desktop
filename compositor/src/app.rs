@@ -44,12 +44,15 @@ use smithay::{
 
 use crate::{
     Options,
+    capture::Capture,
     input::{self, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, Keys, event_time},
     render::Renderer,
     state::State,
 };
 
 pub struct App {
+    mtm: MainThreadMarker,
+    capture: Capture,
     event_loop: EventLoop<'static, State>,
     state: State,
     renderer: Renderer,
@@ -118,7 +121,9 @@ impl App {
             return false;
         }
         self.sync_output();
-        if !self.window.isKeyWindow() && self.keys.any_down() {
+        let is_key = self.window.isKeyWindow();
+        self.capture.follow(self.mtm, is_key);
+        if !is_key && self.keys.any_down() {
             self.keys.release_all(&mut self.state, InputTime::now());
         }
         self.state.children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
@@ -267,6 +272,8 @@ fn other_button(event: &NSEvent) -> u32 {
 }
 
 fn quit(mtm: MainThreadMarker) {
+    // The window server would restore the hot key mode at exit anyway; be tidy.
+    with_app(|app| app.capture.stop(mtm));
     NSApplication::sharedApplication(mtm).terminate(None);
 }
 
@@ -351,6 +358,7 @@ pub fn run(mtm: MainThreadMarker, options: Options) {
         }
         match ev.r#type() {
             NSEventType::KeyDown if input::is_quit_chord(ev) => {
+                tracing::info!("Cmd+Shift+Q: leaving");
                 quit(mtm);
             }
             NSEventType::KeyDown | NSEventType::KeyUp => {
@@ -379,6 +387,8 @@ pub fn run(mtm: MainThreadMarker, options: Options) {
 
     APP.with(|cell| {
         *cell.borrow_mut() = Some(App {
+            mtm,
+            capture: Capture::new(options.capture),
             event_loop,
             state,
             renderer,
