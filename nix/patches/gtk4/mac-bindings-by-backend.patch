@@ -1,0 +1,310 @@
+Use macOS-style key bindings (Meta+C/Z/A..., Ctrl+click as secondary click) only
+with the macOS GDK backend, not on every Apple build. With only the Wayland
+backend on Darwin, apps get the standard Linux bindings (Ctrl+C, Ctrl+Z), and
+Cmd stays free for the compositor (see docs/decisions.md).
+
+--- a/gdk/gdkevents.c
++++ b/gdk/gdkevents.c
+@@ -998,7 +998,7 @@
+           ! (bevent->state & (GDK_BUTTON1_MASK | GDK_BUTTON2_MASK)))
+         return TRUE;
+ 
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+       if (bevent->button == GDK_BUTTON_PRIMARY &&
+           (bevent->state & GDK_CONTROL_MASK) &&
+           ! (bevent->state & (GDK_BUTTON1_MASK | GDK_BUTTON2_MASK)))
+--- a/gtk/gtkapplication.c
++++ b/gtk/gtkapplication.c
+@@ -280,7 +280,7 @@
+     path = g_strconcat (base_path, optional_slash, "gtk/help-overlay.ui", NULL);
+     if (g_resources_get_info (path, G_RESOURCE_LOOKUP_FLAGS_NONE, NULL, NULL, NULL))
+       {
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+         const char * const accels[] = { "<Meta>question", NULL };
+ #else
+         const char * const accels[] = { "<Control>question", NULL };
+--- a/gtk/gtkcalendar.c
++++ b/gtk/gtkcalendar.c
+@@ -1460,7 +1460,7 @@
+   GtkCalendar *calendar = GTK_CALENDAR (widget);
+   int return_val;
+   int row, col, day;
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   GdkModifierType modifier = GDK_META_MASK;
+ #else
+   GdkModifierType modifier = GDK_CONTROL_MASK;
+--- a/gtk/gtklabel.c
++++ b/gtk/gtklabel.c
+@@ -2782,7 +2782,7 @@
+                     GTK_MOVEMENT_WORDS, -1);
+ 
+   /* select all */
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding (widget_class,
+                                 GDK_KEY_a, GDK_META_MASK,
+                                 (GtkShortcutFunc) gtk_label_select_all,
+@@ -2799,7 +2799,7 @@
+ #endif
+ 
+   /* unselect all */
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_a, GDK_SHIFT_MASK | GDK_META_MASK,
+                                        "move-cursor",
+@@ -2834,7 +2834,7 @@
+   add_move_binding (widget_class, GDK_KEY_End, GDK_CONTROL_MASK,
+                     GTK_MOVEMENT_BUFFER_ENDS, 1);
+ 
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   add_move_binding (widget_class, GDK_KEY_Right, GDK_ALT_MASK,
+                     GTK_MOVEMENT_WORDS, 1);
+ 
+@@ -2855,7 +2855,7 @@
+ #endif
+ 
+   /* copy */
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_c, GDK_META_MASK,
+                                        "copy-clipboard",
+--- a/gtk/gtklistbase.c
++++ b/gtk/gtklistbase.c
+@@ -1382,7 +1382,7 @@
+   gtk_list_base_add_custom_move_binding (widget_class, GDK_KEY_Page_Up, gtk_list_base_move_cursor_page_up);
+   gtk_list_base_add_custom_move_binding (widget_class, GDK_KEY_Page_Down, gtk_list_base_move_cursor_page_down);
+ 
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_action (widget_class, GDK_KEY_a, GDK_META_MASK, "list.select-all", NULL);
+   gtk_widget_class_add_binding_action (widget_class, GDK_KEY_A, GDK_META_MASK | GDK_SHIFT_MASK, "list.unselect-all", NULL);
+ #else
+@@ -1924,7 +1924,7 @@
+   if ((state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK)
+     *extend = TRUE;
+ 
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   if ((state & GDK_META_MASK) == GDK_META_MASK)
+     *modify = TRUE;
+ #endif
+--- a/gtk/gtklistbox.c
++++ b/gtk/gtklistbox.c
+@@ -754,7 +754,7 @@
+                                        GDK_KEY_space, GDK_CONTROL_MASK,
+                                        "toggle-cursor-row", NULL);
+ 
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_a, GDK_META_MASK,
+                                        "select-all",
+@@ -1975,7 +1975,7 @@
+           state = gdk_event_get_modifier_state (event);
+           extend = (state & GDK_SHIFT_MASK) != 0;
+           modify = (state & GDK_CONTROL_MASK) != 0;
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+           modify = modify | ((state & GDK_META_MASK) != 0);
+ #endif
+           source = gdk_device_get_source (gdk_event_get_device (event));
+--- a/gtk/gtklistfactorywidget.c
++++ b/gtk/gtklistfactorywidget.c
+@@ -454,7 +454,7 @@
+       state = gdk_event_get_modifier_state (event);
+       extend = (state & GDK_SHIFT_MASK) != 0;
+       modify = (state & GDK_CONTROL_MASK) != 0;
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+       modify = modify | ((state & GDK_META_MASK) != 0);
+ #endif
+ 
+--- a/gtk/gtksearchentry.c
++++ b/gtk/gtksearchentry.c
+@@ -675,7 +675,7 @@
+                   NULL,
+                   G_TYPE_NONE, 0);
+ 
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_g, GDK_META_MASK,
+                                        "next-match",
+--- a/gtk/gtktext.c
++++ b/gtk/gtktext.c
+@@ -1459,7 +1459,7 @@
+   add_move_binding (widget_class, GDK_KEY_End, GDK_CONTROL_MASK,
+                     GTK_MOVEMENT_BUFFER_ENDS, 1);
+ 
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   add_move_binding (widget_class, GDK_KEY_Right, GDK_ALT_MASK,
+                     GTK_MOVEMENT_WORDS, 1);
+ 
+@@ -1480,7 +1480,7 @@
+ #endif
+ 
+   /* Select all */
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding (widget_class,
+                                 GDK_KEY_a, GDK_META_MASK,
+                                 (GtkShortcutFunc) gtk_text_select_all,
+@@ -1498,7 +1498,7 @@
+ #endif
+ 
+   /* Unselect all */
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_a, GDK_SHIFT_MASK | GDK_META_MASK,
+                                        "move-cursor",
+@@ -1541,7 +1541,7 @@
+                                        "backspace",
+                                        NULL);
+ 
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_Delete, GDK_ALT_MASK,
+                                        "delete-from-cursor",
+@@ -1573,7 +1573,7 @@
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_Paste, GDK_NO_MODIFIER_MASK,
+                                        "paste-clipboard", NULL);
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_x, GDK_META_MASK,
+                                        "cut-clipboard", NULL);
+@@ -1627,7 +1627,7 @@
+   gtk_widget_class_add_binding_action (widget_class,
+                                        GDK_KEY_Redo, GDK_NO_MODIFIER_MASK,
+                                        "text.redo", NULL);
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_action (widget_class,
+                                        GDK_KEY_z, GDK_META_MASK,
+                                        "text.undo", NULL);
+--- a/gtk/gtktextview.c
++++ b/gtk/gtktextview.c
+@@ -1748,7 +1748,7 @@
+   add_move_binding (widget_class, GDK_KEY_Page_Down, GDK_CONTROL_MASK,
+                     GTK_MOVEMENT_HORIZONTAL_PAGES, 1);
+ 
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   add_move_binding (widget_class, GDK_KEY_Right, GDK_ALT_MASK,
+                     GTK_MOVEMENT_WORDS, 1);
+ 
+@@ -1769,7 +1769,7 @@
+ #endif
+ 
+   /* Select all */
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_a, GDK_META_MASK,
+                                        "select-all",
+@@ -1787,7 +1787,7 @@
+ #endif
+ 
+   /* Unselect all */
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_a, GDK_SHIFT_MASK | GDK_META_MASK,
+                                        "select-all",
+@@ -1829,7 +1829,7 @@
+                                        "delete-from-cursor",
+                                        "(ii)", GTK_DELETE_WORD_ENDS, -1);
+ 
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_Delete, GDK_CONTROL_MASK,
+                                        "delete-from-cursor",
+@@ -1861,7 +1861,7 @@
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_Paste, GDK_NO_MODIFIER_MASK,
+                                        "paste-clipboard", NULL);
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_x, GDK_META_MASK,
+                                        "cut-clipboard", NULL);
+@@ -1902,7 +1902,7 @@
+   gtk_widget_class_add_binding_action (widget_class,
+                                        GDK_KEY_Redo, GDK_NO_MODIFIER_MASK,
+                                        "text.redo", NULL);
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_action (widget_class,
+                                        GDK_KEY_z, GDK_META_MASK,
+                                        "text.undo", NULL);
+--- a/gtk/deprecated/gtkiconview.c
++++ b/gtk/deprecated/gtkiconview.c
+@@ -762,7 +762,7 @@
+ 
+   /* Key bindings */
+ 
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_a, GDK_META_MASK,
+ 				       "select-all",
+@@ -2038,7 +2038,7 @@
+   if (button == GDK_BUTTON_PRIMARY)
+     {
+       GdkModifierType extend_mod_mask = GDK_SHIFT_MASK;
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+       GdkModifierType modify_mod_mask = GDK_META_MASK;
+ #else
+       GdkModifierType modify_mod_mask = GDK_CONTROL_MASK;
+--- a/gtk/deprecated/gtkshortcutswindow.c
++++ b/gtk/deprecated/gtkshortcutswindow.c
+@@ -864,7 +864,7 @@
+                                        "close",
+                                        NULL);
+ 
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class,
+                                        GDK_KEY_f, GDK_META_MASK,
+                                        "search",
+--- a/gtk/deprecated/gtktreeview.c
++++ b/gtk/deprecated/gtktreeview.c
+@@ -1482,7 +1482,7 @@
+   gtk_widget_class_add_binding_signal (widget_class, GDK_KEY_KP_Space, GDK_CONTROL_MASK, "toggle-cursor-row", NULL);
+ 
+ 
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   gtk_widget_class_add_binding_signal (widget_class, GDK_KEY_a, GDK_META_MASK, "select-all", NULL);
+   gtk_widget_class_add_binding_signal (widget_class, GDK_KEY_A, GDK_META_MASK | GDK_SHIFT_MASK, "unselect-all", NULL);
+ #else
+@@ -2690,7 +2690,7 @@
+ 
+   state = gtk_event_controller_get_current_event_state (controller);
+   *modify = (state & GDK_CONTROL_MASK) != 0;
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   *modify = *modify | ((state & GDK_META_MASK) != 0);
+ #endif
+   *extend = (state & GDK_SHIFT_MASK) != 0;
+@@ -13759,7 +13759,7 @@
+ {
+   GtkTreeViewPrivate *priv = gtk_tree_view_get_instance_private (tree_view);
+   GtkWidget *widget = priv->search_entry;
+-#ifdef __APPLE__
++#ifdef GDK_WINDOWING_MACOS
+   GdkModifierType default_accel = GDK_META_MASK;
+ #else
+   GdkModifierType default_accel = GDK_CONTROL_MASK;

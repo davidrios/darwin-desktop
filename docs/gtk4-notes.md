@@ -4,7 +4,7 @@ Outline section 10, item 2.
 
 ## Result (2026-11-20): go
 
-GTK 4.24.0 builds on aarch64-darwin with only the Wayland backend, and `gtk4-widget-factory` runs as a Wayland client under Cocoa-Way (a Smithay compositor drawing with Metal). The compositor's debug snapshot shows one live toplevel committing at about 60 frames per second (animated widgets), with frames submitted to its Metal renderer. Visual check and input: to be confirmed by hand (no Screen Recording permission for an automated screenshot).
+GTK 4.24.0 builds on aarch64-darwin with only the Wayland backend, and `gtk4-widget-factory` runs as a Wayland client under Cocoa-Way (a Smithay compositor drawing with Metal). The compositor's debug snapshot shows one live toplevel committing at about 60 frames per second (animated widgets), with frames submitted to its Metal renderer. Confirmed by hand: widgets draw correctly, typing and clicks work, menus and popovers open. Shortcuts needed a further patch (see "Key bindings").
 
 What it took was small: three source changes to GTK, one upstream patch to libepoxy, and runtime environment variables. No change to GTK's Wayland code beyond the Darwin build guards.
 
@@ -42,8 +42,18 @@ Also seen, not fatal: "Unable to acquire session bus: … without a machine-id".
 
 No libEGL, so GTK's GL renderer is unavailable and GSK uses cairo with wl_shm buffers. That's the expected path until M4. nixpkgs has ANGLE for Darwin (`angle`), which provides `libEGL.dylib`/GLES on Metal; epoxy would load it, but ANGLE has no Wayland EGL platform, so GTK would still fail EGL init and fall back. A Wayland-on-Darwin EGL platform is M4 work.
 
-## Open: macOS-style key bindings in GTK
+## Key bindings: Linux-style (decided 2026-11-20)
 
-GTK enables Mac-style bindings (Cmd+A, Cmd+C, Cmd+Z, word movement with Option, `<Meta>question` for help) under `#ifdef __APPLE__`, independent of the GDK backend: `gtklabel.c`, `gtktext.c`, `gtktextview.c`, `gtklistbox.c`, `gtklistbase.c`, `gtklistfactorywidget.c`, `gtkcalendar.c`, `gtksearchentry.c`, `gtkapplication.c`. They test `GDK_META_MASK`.
+GTK enables Mac-style bindings (Meta+A/C/Z, Option word movement, `<Meta>question`, Ctrl+click as secondary click) under `#ifdef __APPLE__`, independent of the GDK backend, and drops the Ctrl bindings there. Tested under Cocoa-Way, which sends Cmd as Super and Option as Alt: nothing produced Meta, so no shortcut worked (the menu showed "Meta+Z"). Patched to `GDK_WINDOWING_MACOS` (`mac-bindings-by-backend.patch`, 31 blocks in 13 files), so apps get Ctrl+C/Ctrl+Z. See `decisions.md`. Confirmed by hand after the rebuild: Ctrl+C/V/Z work and the menu shows "Ctrl+Z".
 
-In this build those bindings are active, but whether they fire depends on how the compositor maps the Mac keys: if Cmd becomes evdev `KEY_LEFTMETA` (xkb Super), GDK reports `GDK_SUPER_MASK`, and Meta is usually tied to Alt in xkb's default keymap, so "Meta+C" could end up meaning Option+C. Decide the model first (see `decisions.md` once decided), then either keep these blocks (Mac-style editing in apps) or switch them to `GDK_WINDOWING_MACOS` so apps use the Linux bindings (Ctrl+C).
+Left as `__APPLE__` on purpose: `gdkvulkancontext.c` and `gsk/gl/fp16.c` (platform/compiler details), and the file-transfer portal registration in `gdkcontent(de)serializer.c` (it needs D-Bus, not a backend; revisit in M3 with the session bus).
+
+## Testing by hand (2026-11-20)
+
+The user ran `gtk4-widget-factory` under Cocoa-Way for about five minutes: widgets drew correctly, text appeared in entries, clicks worked, popovers and menus opened and closed (about 15 popup surfaces). Shortcuts didn't work before the bindings patch (above).
+
+GTK warned twice about frame timing: `gdk_frame_timings_submitted() called on submitted frame` and `gdk_frame_timings_throttling_hint: runtime check failed (self->result != GDK_FRAME_PREPARING)`. GTK's frame clock and Cocoa-Way's frame callback / presentation feedback disagree. Not fatal; relevant to our compositor's frame pacing (outline section 6, item 6).
+
+## Known issue: print preview crashes
+
+Print preview in `gtk4-widget-factory` aborts. GTK launches the external previewer with `g_app_info_create_from_commandline()`, which GLib on Darwin doesn't support ("Creating an app info from a command line not currently supported", the same missing `GDesktopAppInfo` as above). The failed preview then reaches `preview_print_idle_done` (`gtk/print/gtkprintoperation.c`), which calls `cairo_surface_destroy` on a surface that `gtk_print_operation_unix_launch_preview` has already destroyed, and cairo's reference-count assertion aborts. The same code is on GTK main; whether Linux can reach it hasn't been checked. Fixing GLib's desktop app info on Darwin (an M3 item anyway) should remove the trigger; the extra destroy may also be worth reporting upstream.

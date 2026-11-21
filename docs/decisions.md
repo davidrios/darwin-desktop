@@ -2,6 +2,20 @@
 
 Newest first. Each entry: what was decided, why, and what it implies. Earlier decisions are recorded in `PROJECT_OUTLINE.md` section 2.
 
+## 2026-11-20: apps use Linux shortcuts; Cmd belongs to the compositor
+
+**Decision:** Wayland apps in the session use the standard Linux key bindings (Ctrl+C, Ctrl+V, Ctrl+Z, Ctrl+A). Cmd reaches clients as evdev `KEY_LEFTMETA`/`KEY_RIGHTMETA` (xkb Super), which is free to serve as the compositor's main modifier, the way Super does in Hyprland.
+
+**Why:** "Linux in spirit", and it keeps one modifier for the window manager. The alternative, Mac-style Cmd+C in apps, needs Cmd delivered as xkb Meta and leaves the compositor without a modifier of its own.
+
+**Found while testing GTK under Cocoa-Way:** GTK compiled on Apple turns on Mac-style bindings (`GDK_META_MASK`) by `#ifdef __APPLE__`, independent of the GDK backend, and drops the Ctrl ones. With Cmd sent as Super and Option as Alt, nothing produces Meta, so no copy/paste/undo shortcut worked at all (the menu showed "Meta+Z").
+
+**Implications:**
+- `nix/patches/gtk4/mac-bindings-by-backend.patch` switches those blocks (13 files, including Ctrl+click as secondary click in `gdkevents.c`) to `GDK_WINDOWING_MACOS`.
+- Qt and other toolkits will need the same check when they are ported.
+- The compositor's own keybinds default to Cmd (Super) chords; the Cmd+Shift+Q escape chord above fits this.
+- Muscle memory: people coming from macOS will press Cmd+C inside apps. A per-app or global remap (Cmd+C → Ctrl+C) could come later as a compositor option; not decided.
+
 ## 2026-11-20: keyboard capture in Stage A follows 2ksbox
 
 **Decision:** In Stage A (the compositor as a full-screen app), system shortcuts are captured the way 2ksbox does it (`~/work/win-98-xp-virt`, `docs/03-display-pipeline.md` "Input path"; implementation in the `mitsuami-appkit` crate, `src/surface.rs`):

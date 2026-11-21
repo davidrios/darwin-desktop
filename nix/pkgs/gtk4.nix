@@ -27,6 +27,7 @@
     patches = (old.patches or [ ]) ++ [
       ../patches/gtk4/no-gdesktopappinfo-on-darwin.patch
       ../patches/gtk4/color-picker-by-backend.patch
+      ../patches/gtk4/mac-bindings-by-backend.patch
     ];
 
     buildInputs = old.buildInputs ++ [ linux-input-headers ];
