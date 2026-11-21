@@ -47,6 +47,7 @@ use crate::{
     capture::Capture,
     cursor::{self, CursorKey},
     input::{self, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, Keys, event_time},
+    layout::{self, MacLayout},
     render::Renderer,
     state::State,
 };
@@ -58,6 +59,10 @@ pub struct App {
     state: State,
     renderer: Renderer,
     keys: Keys,
+    /// A fixed macOS layout id; `None` follows the current input source.
+    keyboard_layout: Option<String>,
+    /// The macOS layout the current keymap was generated from.
+    active_layout: Option<String>,
     cursor: Option<CursorKey>,
     window: Retained<NSWindow>,
     view: Retained<CompositorView>,
@@ -114,6 +119,31 @@ impl App {
         });
         tracing::debug!("output {}x{} points, scale {scale}, {} Hz", size.w, size.h, refresh / 1000);
         self.state.set_output_size(size, scale, refresh);
+    }
+
+    /// Generate the keymap from the macOS layout and send it to clients.
+    fn apply_keyboard_layout(&mut self) {
+        let layout = match &self.keyboard_layout {
+            Some(id) => MacLayout::by_id(id),
+            None => MacLayout::current(),
+        };
+        let Some(layout) = layout else {
+            tracing::warn!("keyboard layout {:?} not found; keeping the current keymap", self.keyboard_layout);
+            return;
+        };
+        // macOS posts the change notification more than once per switch.
+        if self.active_layout.as_deref() == Some(layout.id.as_str()) {
+            return;
+        }
+        let Some(keyboard) = self.state.seat.get_keyboard() else { return };
+        match keyboard.set_keymap_from_string(&mut self.state, layout.xkb_keymap()) {
+            Ok(()) => {
+                tracing::info!("keyboard layout: {} ({})", layout.name, layout.id);
+                self.active_layout = Some(layout.id.clone());
+            }
+            Err(err) => tracing::error!("keymap generated from {} failed to compile: {err:?}", layout.id),
+        }
+        self.flush();
     }
 
     /// Show the client's cursor if it changed.
@@ -324,6 +354,36 @@ fn quit(mtm: MainThreadMarker) {
     NSApplication::sharedApplication(mtm).terminate(None);
 }
 
+/// macOS switched keyboard input source (menu bar, Settings, another app).
+unsafe extern "C" fn input_source_changed(
+    _center: *mut c_void,
+    _observer: *mut c_void,
+    _name: *const c_void,
+    _object: *const c_void,
+    _info: *const c_void,
+) {
+    with_app(|app| {
+        if app.keyboard_layout.is_none() {
+            app.apply_keyboard_layout();
+        }
+    });
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFNotificationCenterGetDistributedCenter() -> *mut c_void;
+    fn CFNotificationCenterAddObserver(
+        center: *mut c_void,
+        observer: *const c_void,
+        callback: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, *const c_void, *const c_void),
+        name: *const c_void,
+        object: *const c_void,
+        suspension_behavior: isize,
+    );
+}
+/// CFNotificationSuspensionBehaviorDeliverImmediately
+const DELIVER_IMMEDIATELY: isize = 4;
+
 /// The calloop fd became readable.
 unsafe extern "C-unwind" fn loop_fd_ready(fd: *mut CFFileDescriptor, _types: CFOptionFlags, _info: *mut c_void) {
     with_app(App::dispatch);
@@ -440,6 +500,8 @@ pub fn run(mtm: MainThreadMarker, options: Options) {
             state,
             renderer,
             keys: Keys::default(),
+            keyboard_layout: options.keyboard_layout.clone(),
+            active_layout: None,
             cursor: None,
             window: window.clone(),
             view: view.clone(),
@@ -449,6 +511,18 @@ pub fn run(mtm: MainThreadMarker, options: Options) {
         });
     });
     with_app(App::sync_output);
+    with_app(App::apply_keyboard_layout);
+    // SAFETY: the callback is a plain function; the name is a static CFString.
+    unsafe {
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDistributedCenter(),
+            ptr::null(),
+            input_source_changed,
+            layout::kTISNotifySelectedKeyboardInputSourceChanged as *const _ as *const c_void,
+            ptr::null(),
+            DELIVER_IMMEDIATELY,
+        );
+    }
 
     if !options.command.is_empty() {
         let mut command = Command::new(&options.command[0]);

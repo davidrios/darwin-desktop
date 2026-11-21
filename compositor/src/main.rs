@@ -4,13 +4,14 @@
 //! window drawn with Metal, Wayland clients composited into it, keyboard and
 //! pointer forwarded from AppKit. Smithay handles the protocol state.
 //!
-//! Usage: compositor [--fullscreen] [--no-capture] [-- client-command args...]
+//! Usage: compositor [--fullscreen] [--no-capture] [--keyboard-layout ID] [--dump-keymap] [-- client args...]
 
 mod app;
 mod capture;
 mod cursor;
 mod input;
 mod keymap;
+mod layout;
 mod render;
 mod state;
 
@@ -23,6 +24,8 @@ pub struct Options {
     pub fullscreen: bool,
     /// Take the system's shortcuts (Cmd+Tab, Cmd+Space, ...) while our window is key.
     pub capture: bool,
+    /// A macOS layout id to use instead of following the current input source.
+    pub keyboard_layout: Option<String>,
     /// A client to start once the socket is up, with WAYLAND_DISPLAY set.
     pub command: Vec<OsString>,
 }
@@ -32,7 +35,7 @@ fn main() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    let mut options = Options { fullscreen: false, capture: true, command: Vec::new() };
+    let mut options = Options { fullscreen: false, capture: true, keyboard_layout: None, command: Vec::new() };
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -42,8 +45,33 @@ fn main() {
             }
             Some("--fullscreen") => options.fullscreen = true,
             Some("--no-capture") => options.capture = false,
+            Some("--keyboard-layout") => {
+                let Some(id) = args.next().and_then(|a| a.into_string().ok()) else {
+                    eprintln!("--keyboard-layout needs a macOS layout id, e.g. com.apple.keylayout.Brazilian-Pro");
+                    std::process::exit(2);
+                };
+                options.keyboard_layout = Some(id);
+            }
+            Some("--dump-keymap") => {
+                let layout = match &options.keyboard_layout {
+                    Some(id) => layout::MacLayout::by_id(id),
+                    None => layout::MacLayout::current(),
+                };
+                match layout {
+                    Some(layout) => print!("{}", layout.xkb_keymap()),
+                    None => {
+                        eprintln!("no such keyboard layout");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
             Some("-h" | "--help") => {
-                println!("usage: compositor [--fullscreen] [--no-capture] [-- client-command args...]");
+                println!("usage: compositor [--fullscreen] [--no-capture] [--keyboard-layout ID] [--dump-keymap]");
+                println!("                  [-- client-command args...]");
+                println!("The keymap is generated from the macOS keyboard layout: the current input");
+                println!("source (followed as it changes), or ID, e.g. com.apple.keylayout.Brazilian-Pro.");
+                println!("--dump-keymap prints the generated xkb keymap (put --keyboard-layout first).");
                 println!("Cmd+Shift+Q quits. While the window is focused, system shortcuts");
                 println!("(Cmd+Tab, Cmd+Space, Ctrl+arrows...) go to clients unless --no-capture.");
                 return;

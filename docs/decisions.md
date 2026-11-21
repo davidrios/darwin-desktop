@@ -2,6 +2,18 @@
 
 Newest first. Each entry: what was decided, why, and what it implies. Earlier decisions are recorded in `PROJECT_OUTLINE.md` section 2.
 
+## 2026-11-21: keyboard layouts generated from macOS; input methods via fcitx5 later
+
+**Decision:**
+- The xkb keymap sent to clients is generated from the macOS keyboard layout (`compositor/src/layout.rs`): each key through `UCKeyTranslate` with no modifier, Shift, Option and Option+Shift as xkb levels 1-4, macOS dead keys as xkb dead keysyms (clients' compose tables combine them). It follows the current macOS input source and switches when it changes; `--keyboard-layout <id>` fixes one. Our own config will choose layouts once there is a config.
+- **Left Option is Alt** (app shortcuts, menu mnemonics); **right Option is the level-3 shift** that types the layout's Option characters and dead keys.
+- **No bridge to macOS input methods.** They draw candidate windows through WindowServer and AppKit and would stop working in M5. Input methods (CJK, emoji) come from fcitx5 ported to Darwin, over Wayland's `input-method-v2` (which Smithay supports), in M3 together with D-Bus.
+- Configuration that System Settings does today (layouts, input methods, displays, keybinds) will be our own settings app, a Wayland client in the session (possibly built with mitsuami's GTK backend).
+
+**Why:** Generating from the Mac layout makes typing identical to macOS, Option characters included, with no table of layout names to maintain. `UCKeyTranslate` lives in CoreServices; reading layouts through the Text Input Sources API may need revisiting for M5 (the `.keylayout` data can be read directly).
+
+**Verified (2026-11-21, by hand with GTK):** Mac U.S. Option characters and Option dead keys, Brazilian ABNT2 dead keys and ç, live switching between input sources, left Option as Alt.
+
 ## 2026-11-21: licence MIT OR Apache-2.0
 
 **Decision:** This project's own code is dual-licensed MIT OR Apache-2.0, as is usual in the Rust ecosystem (`LICENSE-MIT`, `LICENSE-APACHE`). Third-party code keeps its own licence: patches in `patches/` follow their upstream's.
