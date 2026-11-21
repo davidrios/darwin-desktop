@@ -185,7 +185,21 @@ impl Renderer {
                 }
             };
             let (w, h, stride, offset) = (info.width, info.height, info.stride, info.offset);
-            if w <= 0 || h <= 0 || offset < 0 || (offset as usize + stride as usize * h as usize) > len {
+            // Smithay validates buffers at creation, but this read is unsafe:
+            // check the whole extent here too, without overflow. Rows are
+            // 4 bytes per pixel; the last row needs only `row` bytes.
+            if w <= 0 || h <= 0 || stride <= 0 || offset < 0 {
+                return None;
+            }
+            let row = (w as usize).checked_mul(4)?;
+            if (stride as usize) < row {
+                return None;
+            }
+            let end = (stride as usize)
+                .checked_mul(h as usize - 1)
+                .and_then(|n| n.checked_add(offset as usize))
+                .and_then(|n| n.checked_add(row))?;
+            if end > len {
                 return None;
             }
             let reuse = cache.borrow().as_ref().map(|c| c.texture.clone()).filter(|t| {
