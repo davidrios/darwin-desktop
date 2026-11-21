@@ -2,6 +2,16 @@
 
 Newest first. Each entry: what was decided, why, and what it implies. Earlier decisions are recorded in `PROJECT_OUTLINE.md` section 2.
 
+## 2026-11-21: third-party changes are carried as patch queues
+
+**Decision:** Every change to someone else's code lives in `patches/<project>/NNN-*.patch`, documented in `patches/README.md` (what, why, drop when), the way 2ksbox carries QEMU. Rust dependencies we patch (Smithay, reis) are pinned submodules in `third_party/`, patched by `scripts/prepare-third-party.sh` and used through Cargo path dependencies. C libraries from nixpkgs keep being patched in their Nix derivations, from the same `patches/` tree.
+
+**Why:** One place to see every divergence from upstream and when it can go. Deterministic prepare (restore, then apply in order) means a half-applied tree can't slip through. No public forks are needed; upstream PRs remain possible and drop a patch when merged.
+
+**Implications:**
+- After cloning: `git submodule update --init && scripts/prepare-third-party.sh`.
+- The compositor's Nix build will need the submodule sources plus the queue (to be wired up with the M1 crate).
+
 ## 2026-11-21: Track 2, a new compositor on Smithay
 
 **Decision:** The compositor is new code built on Smithay for the Wayland protocol layer. Cocoa-Way is not forked; it remains a reference to study and a test display, and none of its code is copied.
@@ -23,7 +33,7 @@ Newest first. Each entry: what was decided, why, and what it implies. Earlier de
 **Found while testing GTK under Cocoa-Way:** GTK compiled on Apple turns on Mac-style bindings (`GDK_META_MASK`) by `#ifdef __APPLE__`, independent of the GDK backend, and drops the Ctrl ones. With Cmd sent as Super and Option as Alt, nothing produces Meta, so no copy/paste/undo shortcut worked at all (the menu showed "Meta+Z").
 
 **Implications:**
-- `nix/patches/gtk4/mac-bindings-by-backend.patch` switches those blocks (13 files, including Ctrl+click as secondary click in `gdkevents.c`) to `GDK_WINDOWING_MACOS`.
+- `patches/gtk4/003-mac-bindings-by-backend.patch` switches those blocks (13 files, including Ctrl+click as secondary click in `gdkevents.c`) to `GDK_WINDOWING_MACOS`.
 - Qt and other toolkits will need the same check when they are ported.
 - The compositor's own keybinds default to Cmd (Super) chords; the Cmd+Shift+Q escape chord above fits this.
 - Muscle memory: people coming from macOS will press Cmd+C inside apps. A per-app or global remap (Cmd+C → Ctrl+C) could come later as a compositor option; not decided.
@@ -67,6 +77,6 @@ Newest first. Each entry: what was decided, why, and what it implies. Earlier de
 
 ## 2026-11-20: Darwin wayland patch source
 
-**Decision:** Vendor the patch series from `barracuda156/wayland-mac` (branch `1.26.0-mac`, commit `eb50623f`) as `nix/patches/wayland/darwin-1.26.0.patch`, applied to the upstream 1.26.0 release tarball.
+**Decision:** Vendor the patch series from `barracuda156/wayland-mac` (branch `1.26.0-mac`, commit `eb50623f`) as `patches/wayland/001-darwin.patch`, applied to the upstream 1.26.0 release tarball.
 
 **Why:** It is what MacPorts ships, it includes owl-compositor's Darwin fixes, and it is based on the same 1.26.0 that nixpkgs packages. Vendoring the diff keeps the build independent of a personal fork's branch.

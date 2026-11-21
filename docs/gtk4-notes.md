@@ -12,7 +12,7 @@ What it took was small: three source changes to GTK, one upstream patch to libep
 
 | Package | Change from nixpkgs |
 |---|---|
-| `gtk4` (`nix/pkgs/gtk4.nix`) | `waylandSupport = true`, X11 and Vulkan off, `macos-backend=false`. Removes upstream's "no Wayland on Darwin" line in `meson.build`. Patches: `no-gdesktopappinfo-on-darwin.patch`, `color-picker-by-backend.patch`. Adds `linux-input-headers`. |
+| `gtk4` (`nix/pkgs/gtk4.nix`) | `waylandSupport = true`, X11 and Vulkan off, `macos-backend=false`. Removes upstream's "no Wayland on Darwin" line in `meson.build`. Patches: `001-no-gdesktopappinfo-on-darwin.patch`, `002-color-picker-by-backend.patch`. Adds `linux-input-headers`. |
 | `libepoxy` (`nix/pkgs/libepoxy.nix`) | `-Degl=yes` plus upstream commit 47d975d (EGL on Apple, loads `libEGL.dylib`), with Khronos headers from `libglvnd.dev`, propagated. |
 | `linux-input-headers` | `linux/input-event-codes.h` (Linux 6.12) and a `linux/input.h` shim with constants only. |
 | `gtk4-demos` | GTK's demo programs wrapped with the runtime environment below. |
@@ -44,7 +44,7 @@ No libEGL, so GTK's GL renderer is unavailable and GSK uses cairo with wl_shm bu
 
 ## Key bindings: Linux-style (decided 2026-11-20)
 
-GTK enables Mac-style bindings (Meta+A/C/Z, Option word movement, `<Meta>question`, Ctrl+click as secondary click) under `#ifdef __APPLE__`, independent of the GDK backend, and drops the Ctrl bindings there. Tested under Cocoa-Way, which sends Cmd as Super and Option as Alt: nothing produced Meta, so no shortcut worked (the menu showed "Meta+Z"). Patched to `GDK_WINDOWING_MACOS` (`mac-bindings-by-backend.patch`, 31 blocks in 13 files), so apps get Ctrl+C/Ctrl+Z. See `decisions.md`. Confirmed by hand after the rebuild: Ctrl+C/V/Z work and the menu shows "Ctrl+Z".
+GTK enables Mac-style bindings (Meta+A/C/Z, Option word movement, `<Meta>question`, Ctrl+click as secondary click) under `#ifdef __APPLE__`, independent of the GDK backend, and drops the Ctrl bindings there. Tested under Cocoa-Way, which sends Cmd as Super and Option as Alt: nothing produced Meta, so no shortcut worked (the menu showed "Meta+Z"). Patched to `GDK_WINDOWING_MACOS` (`003-mac-bindings-by-backend.patch`, 31 blocks in 13 files), so apps get Ctrl+C/Ctrl+Z. See `decisions.md`. Confirmed by hand after the rebuild: Ctrl+C/V/Z work and the menu shows "Ctrl+Z".
 
 Left as `__APPLE__` on purpose: `gdkvulkancontext.c` and `gsk/gl/fp16.c` (platform/compiler details), and the file-transfer portal registration in `gdkcontent(de)serializer.c` (it needs D-Bus, not a backend; revisit in M3 with the session bus).
 

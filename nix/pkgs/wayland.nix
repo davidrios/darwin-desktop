@@ -15,7 +15,7 @@
   withTests = true;
 }).overrideAttrs
   (old: {
-    patches = (old.patches or [ ]) ++ [ ../patches/wayland/darwin-1.26.0.patch ];
+    patches = (old.patches or [ ]) ++ [ ../../patches/wayland/001-darwin.patch ];
 
     # display-test's send_overflow_disconnection never reaches the expected
     # EAGAIN/E2BIG on Darwin unix sockets and crawls until the meson timeout.

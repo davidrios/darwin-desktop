@@ -14,7 +14,7 @@
 { libepoxy, libglvnd }:
 
 (libepoxy.override { x11Support = false; }).overrideAttrs (old: {
-  patches = (old.patches or [ ]) ++ [ ../patches/libepoxy/egl-on-darwin-47d975d.patch ];
+  patches = (old.patches or [ ]) ++ [ ../../patches/libepoxy/001-egl-on-darwin.patch ];
   propagatedBuildInputs = (old.propagatedBuildInputs or [ ]) ++ [ libglvnd.dev ];
   mesonFlags = map (f: if f == "-Degl=no" then "-Degl=yes" else f) old.mesonFlags;
 })

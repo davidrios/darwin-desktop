@@ -1,0 +1,8 @@
+[submodule "third_party/smithay"]
+	path = third_party/smithay
+	url = https://github.com/Smithay/smithay.git
+	ignore = dirty
+[submodule "third_party/reis"]
+	path = third_party/reis
+	url = https://github.com/ids1024/reis.git
+	ignore = dirty

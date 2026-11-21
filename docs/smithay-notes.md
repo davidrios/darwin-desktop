@@ -4,8 +4,8 @@ Outline section 7: "does Smithay build and run on current macOS without patches?
 
 ## Result: two small patches needed
 
-1. **It doesn't build.** Master depends on `reis` (libei) unconditionally, and reis 0.7.1 uses Linux-only `MSG_NOSIGNAL` and `MSG_CMSG_CLOEXEC`. Fix: `nix/patches/reis/darwin-socket-flags.patch`. On Apple, send without the flag and set `SO_NOSIGPIPE` on the socket; receive without the flag and set `FD_CLOEXEC` on each received fd.
-2. **Keymaps can't be shared.** `SealedFile` (used for `wl_keyboard.keymap`) falls back to `shm_open` + `write(2)` off Linux/FreeBSD. On macOS, writing to a POSIX shm object fails with `ENXIO`, and such objects can't be mapped `MAP_PRIVATE` either (`EINVAL`), which clients must use for keymaps (`wl_keyboard` v7+). Without a fix, no client gets a keyboard. Fix: `nix/patches/smithay/darwin-sealed-file.patch`. On Apple, write a `0600` temporary file, reopen it read-only, unlink it, and hand out the read-only fd.
+1. **It doesn't build.** Master depends on `reis` (libei) unconditionally, and reis 0.7.1 uses Linux-only `MSG_NOSIGNAL` and `MSG_CMSG_CLOEXEC`. Fix: `patches/reis/001-darwin-socket-flags.patch`. On Apple, send without the flag and set `SO_NOSIGPIPE` on the socket; receive without the flag and set `FD_CLOEXEC` on each received fd.
+2. **Keymaps can't be shared.** `SealedFile` (used for `wl_keyboard.keymap`) falls back to `shm_open` + `write(2)` off Linux/FreeBSD. On macOS, writing to a POSIX shm object fails with `ENXIO`, and such objects can't be mapped `MAP_PRIVATE` either (`EINVAL`), which clients must use for keymaps (`wl_keyboard` v7+). Without a fix, no client gets a keyboard. Fix: `patches/smithay/001-darwin-sealed-file.patch`. On Apple, write a `0600` temporary file, reopen it read-only, unlink it, and hand out the read-only fd.
 
 Verified with a probe program: 64 KiB round-trips through a `MAP_PRIVATE` read-only mapping, a writable shared mapping of the fd is refused, and no temporary file is left behind.
 
@@ -19,6 +19,6 @@ Both are written for this project (Cocoa-Way carries its own different fix for t
 - Patches `wayland-backend` for fair, budgeted client dispatch. That's a product choice, not a Darwin requirement; worth remembering if one client can flood the compositor.
 - Uses winit for the window and input on macOS, and its own Metal renderer for SHM buffers.
 
-## How to carry the patches (open)
+## How the patches are carried (decided 2026-11-21)
 
-Cargo can't apply patch files. Options: upstream PRs (best, and both changes are small); a fork with a branch, referenced by git URL and exact rev; or vendoring patched sources in the repo. Until decided, the patches live in `nix/patches/`.
+As patch queues, the way 2ksbox carries QEMU: Smithay and reis are pinned submodules in `third_party/`, their queues are `patches/smithay/` and `patches/reis/`, and `scripts/prepare-third-party.sh` applies them. See `patches/README.md`. Upstream PRs can still follow; a merged one drops its patch.
