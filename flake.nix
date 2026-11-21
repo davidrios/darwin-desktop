@@ -31,8 +31,14 @@
           gtk4-demos
           compositor
           vte
+          session
           ;
         default = dw.compositor;
+      };
+
+      apps.${system}.session = {
+        type = "app";
+        program = "${dw.session}/bin/darwin-desktop-session";
       };
 
       checks.${system} = {

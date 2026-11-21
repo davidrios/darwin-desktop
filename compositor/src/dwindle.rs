@@ -102,8 +102,27 @@ impl<T: Clone + PartialEq> Dwindle<T> {
         out
     }
 
+    /// The tile a window had at the last `recalc`.
+    pub fn rect_of(&self, item: &T) -> Option<Rect> {
+        self.leaf_of(item).map(|l| self.node(l).rect)
+    }
+
     /// Adds a window, splitting `opening_on` (or the first window).
     pub fn insert(&mut self, item: T, opening_on: Option<&T>, pointer: Option<(f64, f64)>, area: Rect, cfg: &DwindleConfig) {
+        self.insert_split(item, opening_on, pointer, area, cfg, None);
+    }
+
+    /// `insert` with the split direction forced: `Some(true)` stacks the two
+    /// windows, `Some(false)` puts them side by side.
+    pub fn insert_split(
+        &mut self,
+        item: T,
+        opening_on: Option<&T>,
+        pointer: Option<(f64, f64)>,
+        area: Rect,
+        cfg: &DwindleConfig,
+        stacked: Option<bool>,
+    ) {
         self.recalc(area, cfg);
         let leaf = Node { parent: None, kind: Kind::Leaf(item), rect: area };
         let Some(root) = self.root else {
@@ -114,7 +133,10 @@ impl<T: Clone + PartialEq> Dwindle<T> {
         let target_rect = self.node(target).rect;
         let target_parent = self.node(target).parent;
 
-        let side_by_side = target_rect.w > target_rect.h * cfg.split_width_multiplier;
+        let side_by_side = match stacked {
+            Some(stacked) => !stacked,
+            None => target_rect.w > target_rect.h * cfg.split_width_multiplier,
+        };
         let new_first = match cfg.force_split {
             1 => true,
             2 => false,

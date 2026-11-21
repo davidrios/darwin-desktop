@@ -91,7 +91,12 @@ impl State {
         let dh = display.handle();
 
         let compositor_state = CompositorState::new::<State>(&dh);
-        let xdg_shell_state = XdgShellState::new::<State>(&dh);
+        // Only fullscreen: a tiling compositor has no minimize or maximize, and
+        // clients (GTK) hide those buttons when they aren't advertised.
+        let xdg_shell_state = XdgShellState::new_with_capabilities::<State>(
+            &dh,
+            [smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::WmCapabilities::Fullscreen],
+        );
         let shm_state = ShmState::new::<State>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&dh);
         let data_device_state = DataDeviceState::new::<State>(&dh);
@@ -294,6 +299,23 @@ impl XdgShellHandler for State {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(window) = self.find_window(surface.wl_surface()) {
             self.unmanage(&window);
+        }
+    }
+
+    /// A client asked for fullscreen (e.g. F11): the same as the fullscreen bind.
+    fn fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        _output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
+    ) {
+        if let Some(window) = self.find_window(surface.wl_surface()) {
+            self.set_fullscreen(&window, true);
+        }
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.find_window(surface.wl_surface()) {
+            self.set_fullscreen(&window, false);
         }
     }
 

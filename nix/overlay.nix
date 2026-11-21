@@ -21,6 +21,7 @@ final: prev: {
     gtk4-demos = self.callPackage ./pkgs/gtk4-demos.nix { };
 
     compositor = self.callPackage ./pkgs/compositor.nix { };
+    session = self.callPackage ./pkgs/session.nix { };
 
     # Wayland clients for the session.
     # VTE (GNOME's terminal widget) on our Wayland GTK 4, with its sample terminal app.

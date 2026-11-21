@@ -20,7 +20,7 @@ use smithay::{
     backend::renderer::utils::{CommitCounter, RendererSurfaceStateUserData},
     desktop::PopupManager,
     reexports::wayland_server::protocol::{wl_shm, wl_surface::WlSurface},
-    utils::{Logical, Point},
+    utils::{Logical, Point, Rectangle},
     wayland::{
         compositor::{SurfaceData, TraversalAction, with_surface_tree_downward},
         shm::with_buffer_contents,
@@ -34,10 +34,17 @@ const SHADERS: &str = r#"
 using namespace metal;
 
 struct Quad {
-    float4 dst;     // x, y, w, h in normalized device coordinates
-    float4 src;     // u, v, w, h in texture coordinates
+    float4 dst;        // x, y, w, h in normalized device coordinates
+    float4 src;        // u, v, w, h in texture coordinates
+    float4 rect;       // rounded rectangle in pixels (x, y, w, h), top-left origin
     float alpha;
-    uint opaque;    // XRGB: ignore the alpha channel
+    uint opaque;       // XRGB: ignore the alpha channel
+    float radius;      // corner radius in pixels; 0: no rounding
+    float border;      // border width in pixels (border pipeline)
+    float angle;       // gradient angle in radians (border pipeline)
+    uint ncolors;      // gradient colours used (border pipeline)
+    float2 _pad;
+    float4 colors[8];  // premultiplied gradient colours (border pipeline)
 };
 
 struct VOut {
@@ -53,23 +60,83 @@ vertex VOut quad_vertex(uint vid [[vertex_id]], constant Quad &q [[buffer(0)]]) 
     return o;
 }
 
+// Signed distance to a rounded rectangle: negative inside.
+static float rounded_rect(float2 p, float4 rect, float r) {
+    float2 half_size = rect.zw * 0.5;
+    float2 q = abs(p - (rect.xy + half_size)) - (half_size - r);
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
 fragment float4 quad_fragment(VOut in [[stage_in]], constant Quad &q [[buffer(0)]],
                               texture2d<float> tex [[texture(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float4 c = tex.sample(s, in.uv);
     if (q.opaque != 0) { c.a = 1.0; }
+    if (q.radius > 0.0) {
+        // Antialiased rounded corners: one pixel of coverage falloff.
+        c *= saturate(0.5 - rounded_rect(in.pos.xy, q.rect, q.radius));
+    }
     return c * q.alpha;
+}
+
+// A border: the ring between the outer rounded rectangle and the inner one
+// (inset by the border width), filled with an angled gradient.
+fragment float4 border_fragment(VOut in [[stage_in]], constant Quad &q [[buffer(0)]]) {
+    float2 p = in.pos.xy;
+    float outer = rounded_rect(p, q.rect, q.radius);
+    float4 inner_rect = q.rect + float4(q.border, q.border, -2.0 * q.border, -2.0 * q.border);
+    float inner = rounded_rect(p, inner_rect, max(q.radius - q.border, 0.0));
+    float coverage = saturate(0.5 - outer) * saturate(0.5 + inner);
+
+    float4 color = q.colors[0];
+    if (q.ncolors > 1) {
+        float2 dir = float2(cos(q.angle), sin(q.angle));
+        float2 half_size = q.rect.zw * 0.5;
+        float extent = abs(half_size.x * dir.x) + abs(half_size.y * dir.y);
+        float t = saturate(dot(p - (q.rect.xy + half_size), dir) / max(extent, 1.0) * 0.5 + 0.5);
+        float pos = t * float(q.ncolors - 1);
+        uint i = min(uint(floor(pos)), q.ncolors - 2);
+        color = mix(q.colors[i], q.colors[i + 1], pos - float(i));
+    }
+    return color * coverage * q.alpha;
 }
 "#;
 
-/// Matches `struct Quad` in the shader (Metal pads it to 16-byte alignment).
+/// Matches `struct Quad` in the shader (16-byte aligned, 208 bytes).
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Quad {
     dst: [f32; 4],
     src: [f32; 4],
+    rect: [f32; 4],
     alpha: f32,
     opaque: u32,
-    _pad: [u32; 2],
+    radius: f32,
+    border: f32,
+    angle: f32,
+    ncolors: u32,
+    _pad: [f32; 2],
+    colors: [[f32; 4]; 8],
+}
+
+const _: () = assert!(std::mem::size_of::<Quad>() == 208);
+
+impl Quad {
+    fn empty() -> Quad {
+        Quad {
+            dst: [0.0; 4],
+            src: [0.0, 0.0, 1.0, 1.0],
+            rect: [0.0; 4],
+            alpha: 1.0,
+            opaque: 0,
+            radius: 0.0,
+            border: 0.0,
+            angle: 0.0,
+            ncolors: 0,
+            _pad: [0.0; 2],
+            colors: [[0.0; 4]; 8],
+        }
+    }
 }
 
 type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
@@ -85,6 +152,7 @@ pub struct Renderer {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    border_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     pub layer: Retained<CAMetalLayer>,
 }
 
@@ -97,31 +165,34 @@ impl Renderer {
         let library = device
             .newLibraryWithSource_options_error(&NSString::from_str(SHADERS), None)
             .unwrap_or_else(|err| panic!("compiling shaders: {}", err.localizedDescription()));
-        let vertex = library.newFunctionWithName(&NSString::from_str("quad_vertex")).expect("quad_vertex");
-        let fragment = library.newFunctionWithName(&NSString::from_str("quad_fragment")).expect("quad_fragment");
-
-        let desc = MTLRenderPipelineDescriptor::new();
-        desc.setVertexFunction(Some(&vertex));
-        desc.setFragmentFunction(Some(&fragment));
-        // SAFETY: index 0 always exists.
-        let attachment = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
-        attachment.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-        // Wayland buffers are premultiplied.
-        attachment.setBlendingEnabled(true);
-        attachment.setSourceRGBBlendFactor(MTLBlendFactor::One);
-        attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-        attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-        attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-        let pipeline = device
-            .newRenderPipelineStateWithDescriptor_error(&desc)
-            .unwrap_or_else(|err| panic!("render pipeline: {}", err.localizedDescription()));
+        let function = |name: &str| library.newFunctionWithName(&NSString::from_str(name)).expect(name);
+        let vertex = function("quad_vertex");
+        let pipeline_for = |fragment: &str| {
+            let desc = MTLRenderPipelineDescriptor::new();
+            desc.setVertexFunction(Some(&vertex));
+            desc.setFragmentFunction(Some(&function(fragment)));
+            // SAFETY: index 0 always exists.
+            let attachment = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
+            attachment.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            // Wayland buffers and our colours are premultiplied.
+            attachment.setBlendingEnabled(true);
+            attachment.setSourceRGBBlendFactor(MTLBlendFactor::One);
+            attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+            attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+            attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+            device
+                .newRenderPipelineStateWithDescriptor_error(&desc)
+                .unwrap_or_else(|err| panic!("render pipeline {fragment}: {}", err.localizedDescription()))
+        };
+        let pipeline = pipeline_for("quad_fragment");
+        let border_pipeline = pipeline_for("border_fragment");
 
         let layer = CAMetalLayer::new();
         layer.setDevice(Some(&device));
         layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
         layer.setFramebufferOnly(true);
 
-        Renderer { device, queue, pipeline, layer }
+        Renderer { device, queue, pipeline, border_pipeline, layer }
     }
 
     /// Draws every window and its popups, back to front.
@@ -146,16 +217,41 @@ impl Renderer {
         let Some(encoder) = commands.renderCommandEncoderWithDescriptor(&pass) else { return };
         encoder.setRenderPipelineState(&self.pipeline);
 
-        let mut frame = Frame { renderer: self, encoder: &encoder, scale, width: size.w, height: size.h };
+        let settings = &state.config.settings;
+        let focused = state.focused_window();
+        let mut frame =
+            Frame { renderer: self, encoder: &encoder, scale, width: size.w, height: size.h, round: None };
         for window in state.space.elements() {
             let (Some(loc), Some(toplevel)) = (state.space.element_location(window), window.toplevel()) else {
                 continue;
             };
             let surface = toplevel.wl_surface();
-            // A tiled window draws only inside its tile; its popups anywhere.
-            frame.clip(crate::wm::clip_of(window));
+            let clip = crate::wm::clip_of(window);
+            // What's visible: the window, cut to its tile when it's bigger
+            // than the tile. Border and rounding follow this, not the client size.
+            let full = Rectangle::new(loc, window.geometry().size);
+            let geometry = clip.and_then(|c| full.intersection(c)).unwrap_or(full);
+            let decorated = !state.is_fullscreen(window) && geometry.size.w > 0 && geometry.size.h > 0;
+
+            // Border: a rounded ring just outside the window, in the space the
+            // layout reserved for it.
+            let b = settings.border_size.max(0);
+            if decorated && b > 0 {
+                let gradient =
+                    if focused.as_ref() == Some(window) { &settings.active_border } else { &settings.inactive_border };
+                let outer = Rectangle::new(
+                    (geometry.loc.x - b, geometry.loc.y - b).into(),
+                    (geometry.size.w + 2 * b, geometry.size.h + 2 * b).into(),
+                );
+                frame.border(outer, (settings.rounding + b) as f64, b as f64, gradient);
+            }
+
+            // Content, rounded; a tiled window only inside its tile; its popups anywhere.
+            frame.round = (decorated && settings.rounding > 0).then_some((geometry, settings.rounding as f64));
+            frame.clip(clip);
             frame.draw_tree(surface, (loc - window.geometry().loc).to_f64());
             frame.clip(None);
+            frame.round = None;
             for (popup, offset) in PopupManager::popups_for_surface(surface) {
                 frame.draw_tree(popup.wl_surface(), (loc + offset - popup.geometry().loc).to_f64());
             }
@@ -255,9 +351,53 @@ struct Frame<'a> {
     scale: f64,
     width: f64,
     height: f64,
+    /// The window rectangle and corner radius (logical) the surfaces being
+    /// drawn are rounded to.
+    round: Option<(Rectangle<i32, Logical>, f64)>,
 }
 
 impl Frame<'_> {
+    /// A logical rectangle in normalized device coordinates (y up, height negative).
+    fn ndc(&self, x: f64, y: f64, w: f64, h: f64) -> [f32; 4] {
+        [
+            (x / self.width * 2.0 - 1.0) as f32,
+            (1.0 - y / self.height * 2.0) as f32,
+            (w / self.width * 2.0) as f32,
+            (-h / self.height * 2.0) as f32,
+        ]
+    }
+
+    /// A logical rectangle in pixels.
+    fn px(&self, r: Rectangle<i32, Logical>) -> [f32; 4] {
+        let s = self.scale as f32;
+        [r.loc.x as f32 * s, r.loc.y as f32 * s, r.size.w as f32 * s, r.size.h as f32 * s]
+    }
+
+    /// A rounded border ring filling `outer` (logical), `width` thick.
+    fn border(&mut self, outer: Rectangle<i32, Logical>, radius: f64, width: f64, gradient: &crate::config::Gradient) {
+        let mut quad = Quad::empty();
+        let r = self.px(outer);
+        quad.dst = self.ndc(r[0] as f64, r[1] as f64, r[2] as f64, r[3] as f64);
+        quad.rect = r;
+        quad.radius = (radius * self.scale) as f32;
+        quad.border = (width * self.scale) as f32;
+        quad.angle = gradient.angle.to_radians();
+        quad.ncolors = gradient.colors.len().clamp(1, 8) as u32;
+        for (slot, c) in quad.colors.iter_mut().zip(&gradient.colors) {
+            *slot = *c;
+        }
+        let bytes = NonNull::from(&quad).cast::<c_void>();
+        let len = std::mem::size_of::<Quad>();
+        // SAFETY: `quad` outlives the calls, which copy it.
+        unsafe {
+            self.encoder.setRenderPipelineState(&self.renderer.border_pipeline);
+            self.encoder.setVertexBytes_length_atIndex(bytes, len, 0);
+            self.encoder.setFragmentBytes_length_atIndex(bytes, len, 0);
+            self.encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::TriangleStrip, 0, 4);
+            self.encoder.setRenderPipelineState(&self.renderer.pipeline);
+        }
+    }
+
     /// Restrict drawing to a logical rectangle, or lift the restriction.
     fn clip(&mut self, rect: Option<smithay::utils::Rectangle<i32, Logical>>) {
         let (w, h) = (self.width as usize, self.height as usize);
@@ -317,23 +457,19 @@ impl Frame<'_> {
         }
         let (x, y) = (pos.x * self.scale, pos.y * self.scale);
         let (w, h) = (size.w * self.scale, size.h * self.scale);
-        let quad = Quad {
-            dst: [
-                (x / self.width * 2.0 - 1.0) as f32,
-                (1.0 - y / self.height * 2.0) as f32,
-                (w / self.width * 2.0) as f32,
-                (-h / self.height * 2.0) as f32,
-            ],
-            src: [
-                (src.loc.x / buffer.w) as f32,
-                (src.loc.y / buffer.h) as f32,
-                (src.size.w / buffer.w) as f32,
-                (src.size.h / buffer.h) as f32,
-            ],
-            alpha: 1.0,
-            opaque: opaque as u32,
-            _pad: [0; 2],
-        };
+        let mut quad = Quad::empty();
+        quad.dst = self.ndc(x, y, w, h);
+        quad.src = [
+            (src.loc.x / buffer.w) as f32,
+            (src.loc.y / buffer.h) as f32,
+            (src.size.w / buffer.w) as f32,
+            (src.size.h / buffer.h) as f32,
+        ];
+        quad.opaque = opaque as u32;
+        if let Some((rect, radius)) = self.round {
+            quad.rect = self.px(rect);
+            quad.radius = (radius * self.scale) as f32;
+        }
         let bytes = NonNull::from(&quad).cast::<c_void>();
         let len = std::mem::size_of::<Quad>();
         // SAFETY: `quad` outlives the calls, which copy it.

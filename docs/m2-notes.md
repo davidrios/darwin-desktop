@@ -1,10 +1,12 @@
 # M2 notes: Hyprland behaviour
 
-## Status (2026-11-21): step 1 of M2 done
+## Status (2026-11-21): steps 1 and 2 of M2 done
 
-Checked by hand with VTE terminals: Lua config, keybinds, dwindle tiling, workspaces, focus and move by direction, float, fullscreen, close.
+Checked by hand with VTE terminals and GTK's widget factory: Lua config, keybinds, dwindle tiling, workspaces, focus and move by direction, float, fullscreen, close (step 1); borders with gradients, rounded corners, minimum-size-aware splits, header bars with only a close button (step 2).
 
-Still to do in M2: borders and rounding (Metal shaders), animations (curves and springs from the config), shadows and blur, layer-shell (bars, launchers), trackpad gestures, groups, special workspaces, window rules, mouse binds, don't split below a window's minimum size.
+Run it: `nix run .#session` (or `COMPOSITOR=…/target/debug/compositor nix run .#session -- <client>` for a development build).
+
+Still to do in M2: animations (curves and springs from the config), shadows and blur, layer-shell (bars, launchers), trackpad gestures, groups, special workspaces, window rules, mouse binds.
 
 ## Config: Hyprland's Lua config
 
@@ -25,3 +27,19 @@ A client whose minimum size exceeds its tile is clipped to the tile (Metal sciss
 ## Terminal: VTE
 
 foot was tried and dropped: it needs C11 threads, `<uchar.h>`, pipe2/accept4 and more on Darwin, too much porting for a test terminal. VTE (GNOME's terminal widget, 0.84.1) built against our Wayland GTK 4 with no source changes except one fix (`patches/vte/001-darwin-fdwalk-stack.patch`: a stack VLA sized from `RLIMIT_NOFILE` overflowed with a high limit and crashed the app on spawning its shell). Its sample app `vte-2.91-gtk4` is the terminal for now (`nix build .#vte`; the default config uses `$TERMINAL`). GNOME Console or Ptyxis (need libadwaita) are the upgrade path.
+
+## Borders and rounding
+
+Metal shaders (`compositor/src/render.rs`). Content is masked to a rounded rectangle with an antialiased signed-distance test (`decoration.rounding`); the border is a second pipeline drawing the ring between the outer rounded rectangle (window plus `border_size`, radius `rounding + border_size`) and the inner one. Colours: `general.col.active_border` / `inactive_border`, in Hyprland's formats (`rgba(RRGGBBAA)`, `rgb(...)`, `0xAARRGGBB`, `{ colors = {...}, angle = deg }`, up to 8 gradient stops), premultiplied. The focused window gets the active colour. Border and rounding follow the visible rectangle (the window cut to its tile when clipped); fullscreen windows get neither.
+
+## Splits and minimum sizes
+
+A new window splits the way dwindle would unless either half would be smaller than the new or the existing window's minimum size (`xdg_toplevel.set_min_size`); then the other direction, else the new window floats.
+
+## Window capabilities, header bars
+
+Only `fullscreen` is advertised in `xdg_toplevel.wm_capabilities`; client fullscreen requests (F11) work like the fullscreen bind. GTK then disables minimize and maximize, but which buttons it shows comes from its `gtk-decoration-layout` setting, which GTK 4 on Wayland reads from the xdg-desktop-portal Settings portal. With no portal (no D-Bus session yet) it falls back to `menu:minimize,maximize,close`. The session launcher (`nix/pkgs/session.nix`) therefore puts a `gtk-4.0/settings.ini` with `gtk-decoration-layout=appmenu:close` on `XDG_CONFIG_DIRS` (a user's own settings.ini still wins). With a portal in M3, the setting comes from there.
+
+## Session launcher
+
+`nix run .#session` runs the compositor with what its clients need: GTK defaults (above), GSettings schemas on `XDG_DATA_DIRS`, the SVG pixbuf loader, GStreamer plugins, VTE as `$TERMINAL` and on `PATH` with the GTK demos. `COMPOSITOR=path` runs a development build.

@@ -107,6 +107,27 @@ impl State {
             .or_else(|| self.wm.workspaces.values().flat_map(|ws| ws.windows()).find(|w| matches(w)))
     }
 
+    /// Whether a window is the active workspace's fullscreen window.
+    pub fn is_fullscreen(&self, w: &Window) -> bool {
+        self.wm.workspaces.get(&self.wm.active).is_some_and(|ws| ws.fullscreen.as_ref() == Some(w))
+    }
+
+    /// Fullscreen a window on its workspace (one per workspace), or undo it.
+    pub fn set_fullscreen(&mut self, w: &Window, on: bool) {
+        let Some(id) = self.workspace_of(w) else { return };
+        let ws = self.wm.workspaces.get_mut(&id).unwrap();
+        if on {
+            ws.fullscreen = Some(w.clone());
+        } else if ws.fullscreen.as_ref() == Some(w) {
+            ws.fullscreen = None;
+        } else {
+            return;
+        }
+        if id == self.wm.active {
+            self.relayout();
+        }
+    }
+
     /// Whether a window floats on the active workspace.
     pub fn is_floating_here(&self, w: &Window) -> bool {
         self.active_ws_ref().floating.contains(w)
@@ -169,14 +190,58 @@ impl State {
             self.active_ws_ref().tiled.at(pointer.0, pointer.1)
         };
         let cfg = self.config.settings.dwindle.clone();
+        // Split the way dwindle would, unless the halves would be smaller than
+        // either window's minimum size: then the other way, else float.
+        let split = if float { None } else { self.split_that_fits(&window, opening_on.as_ref(), area) };
         let ws = self.active_ws();
-        if float {
-            ws.floating.push(window.clone());
-        } else {
-            ws.tiled.insert(window.clone(), opening_on.as_ref(), Some(pointer), area, &cfg);
+        match split {
+            Some(stacked) if !float => {
+                ws.tiled.insert_split(window.clone(), opening_on.as_ref(), Some(pointer), area, &cfg, stacked);
+            }
+            _ => {
+                if !float {
+                    tracing::debug!("no room to tile a window at its minimum size: floating it");
+                }
+                ws.floating.push(window.clone());
+            }
         }
         self.relayout();
         self.focus(Some(window), SERIAL_COUNTER.next_serial());
+    }
+
+    /// How to split for a new window: `Some(None)` dwindle's own choice,
+    /// `Some(Some(stacked))` a forced direction, `None` no split fits both
+    /// windows' minimum sizes.
+    fn split_that_fits(&self, new: &Window, opening_on: Option<&Window>, area: Rect) -> Option<Option<bool>> {
+        let ws = self.active_ws_ref();
+        let target = opening_on.cloned().or_else(|| ws.tiled.tiles().first().map(|(w, _)| w.clone()));
+        let Some(target) = target else { return Some(None) }; // first window: fills the area
+        let Some(rect) = ws.tiled.rect_of(&target) else { return Some(None) };
+        let cfg = &self.config.settings.dwindle;
+        let need = {
+            let (a, b) = (min_size(new), min_size(&target));
+            Size::<i32, Logical>::from((a.w.max(b.w), a.h.max(b.h)))
+        };
+        let fits = |stacked: bool| {
+            let first = if stacked { rect.h / 2.0 * cfg.default_split_ratio } else { rect.w / 2.0 * cfg.default_split_ratio };
+            let halves = if stacked {
+                [Rect::new(rect.x, rect.y, rect.w, first), Rect::new(rect.x, rect.y + first, rect.w, rect.h - first)]
+            } else {
+                [Rect::new(rect.x, rect.y, first, rect.h), Rect::new(rect.x + first, rect.y, rect.w - first, rect.h)]
+            };
+            halves.iter().all(|h| {
+                let r = self.window_rect(*h, area);
+                r.size.w >= need.w && r.size.h >= need.h
+            })
+        };
+        let default_stacked = !(rect.w > rect.h * cfg.split_width_multiplier);
+        if fits(default_stacked) {
+            Some(None)
+        } else if fits(!default_stacked) {
+            Some(Some(!default_stacked))
+        } else {
+            None
+        }
     }
 
     fn active_ws_ref(&self) -> &Workspace {
@@ -458,13 +523,20 @@ impl State {
             }
             Action::Fullscreen => {
                 let Some(w) = focused else { return };
-                let ws = self.active_ws();
-                ws.fullscreen = if ws.fullscreen.as_ref() == Some(&w) { None } else { Some(w) };
-                self.relayout();
+                let on = !self.is_fullscreen(&w);
+                self.set_fullscreen(&w, on);
             }
             Action::Unsupported(name) => tracing::warn!("{name} is not supported yet"),
         }
     }
+}
+
+/// A toplevel's minimum size (xdg_toplevel.set_min_size; 0 when unset).
+fn min_size(window: &Window) -> Size<i32, Logical> {
+    let Some(t) = window.toplevel() else { return (0, 0).into() };
+    smithay::wayland::compositor::with_states(t.wl_surface(), |states| {
+        states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().min_size
+    })
 }
 
 /// Size and tiled/fullscreen states for a toplevel.

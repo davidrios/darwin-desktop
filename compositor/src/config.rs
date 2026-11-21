@@ -73,6 +73,73 @@ impl Gaps {
     }
 }
 
+/// A premultiplied RGBA colour.
+pub type Rgba = [f32; 4];
+
+/// A border colour: one colour, or Hyprland's angled multi-colour gradient.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gradient {
+    pub colors: Vec<Rgba>,
+    /// Degrees; 0 runs left to right, 90 top to bottom.
+    pub angle: f32,
+}
+
+impl Gradient {
+    pub fn solid(c: Rgba) -> Gradient {
+        Gradient { colors: vec![c], angle: 0.0 }
+    }
+}
+
+/// Hyprland's colour formats: `rgba(RRGGBBAA)`, `rgb(RRGGBB)`, `rgba(r, g, b, a)`
+/// (a in 0-1), `0xAARRGGBB` (string or number). Returned premultiplied.
+pub fn parse_color(v: &ConfigValue) -> Option<Rgba> {
+    let argb = |n: u32| {
+        let a = ((n >> 24) & 0xff) as f32 / 255.0;
+        let r = ((n >> 16) & 0xff) as f32 / 255.0;
+        let g = ((n >> 8) & 0xff) as f32 / 255.0;
+        let b = (n & 0xff) as f32 / 255.0;
+        [r * a, g * a, b * a, a]
+    };
+    match v {
+        ConfigValue::Int(n) => Some(argb(*n as u32)),
+        ConfigValue::Float(f) => Some(argb(*f as u32)),
+        ConfigValue::Str(s) => {
+            let s = s.trim();
+            if let Some(hex) = s.strip_prefix("0x") {
+                return u32::from_str_radix(hex, 16).ok().map(argb);
+            }
+            let (func, args) = s.split_once('(')?;
+            let args = args.strip_suffix(')')?.trim();
+            if args.contains(',') {
+                let n: Vec<f32> = args.split(',').map(|p| p.trim().parse().ok()).collect::<Option<_>>()?;
+                let a = if func == "rgba" { *n.get(3)? } else { 1.0 };
+                return Some([n[0] / 255.0 * a, n.get(1)? / 255.0 * a, n.get(2)? / 255.0 * a, a]);
+            }
+            let n = u32::from_str_radix(args, 16).ok()?;
+            match (func, args.len()) {
+                ("rgba", 8) => Some(argb(n.rotate_right(8))),
+                ("rgb", 6) => Some(argb(0xff00_0000 | n)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_gradient(flat: &BTreeMap<String, ConfigValue>, key: &str) -> Option<Gradient> {
+    if let Some(v) = flat.get(key) {
+        if let ConfigValue::List(items) = v {
+            let colors: Vec<Rgba> = items.iter().filter_map(parse_color).collect();
+            return (!colors.is_empty()).then_some(Gradient { colors, angle: 0.0 });
+        }
+        return parse_color(v).map(Gradient::solid);
+    }
+    let ConfigValue::List(items) = flat.get(&format!("{key}.colors"))? else { return None };
+    let colors: Vec<Rgba> = items.iter().filter_map(parse_color).collect();
+    let angle = flat.get(&format!("{key}.angle")).and_then(ConfigValue::as_f64).unwrap_or(0.0) as f32;
+    (!colors.is_empty()).then_some(Gradient { colors, angle })
+}
+
 #[derive(Clone, Debug)]
 pub struct DwindleConfig {
     pub preserve_split: bool,
@@ -109,6 +176,8 @@ pub struct Settings {
     pub gaps_in: Gaps,
     pub gaps_out: Gaps,
     pub border_size: i32,
+    pub active_border: Gradient,
+    pub inactive_border: Gradient,
     pub rounding: i32,
     pub layout: String,
     pub dwindle: DwindleConfig,
@@ -131,6 +200,11 @@ impl Settings {
             gaps_in: gaps("general.gaps_in", 5.0),
             gaps_out: gaps("general.gaps_out", 20.0),
             border_size: num("general.border_size", 1.0) as i32,
+            // Hyprland's defaults: white and dark grey.
+            active_border: parse_gradient(flat, "general.col.active_border")
+                .unwrap_or(Gradient::solid([1.0, 1.0, 1.0, 1.0])),
+            inactive_border: parse_gradient(flat, "general.col.inactive_border")
+                .unwrap_or(Gradient::solid([0.267, 0.267, 0.267, 1.0])),
             rounding: num("decoration.rounding", 0.0) as i32,
             layout: string("general.layout", "dwindle"),
             dwindle: DwindleConfig {
@@ -678,6 +752,16 @@ mod tests {
     }
 
     #[test]
+    fn colors() {
+        let c = |s: &str| parse_color(&ConfigValue::Str(s.into())).unwrap();
+        assert_eq!(c("rgb(00ff00)"), [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(c("0xff0000ff"), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(parse_color(&ConfigValue::Int(0xee1a1a1a)).unwrap()[3], 0xee as f32 / 255.0);
+        let half = c("rgba(ff000080)");
+        assert!((half[0] - 0.502).abs() < 0.01 && (half[3] - 0.502).abs() < 0.01, "premultiplied");
+    }
+
+    #[test]
     fn default_config_loads() {
         let c = Config::load(Some(Path::new("/nonexistent/hyprland.lua")));
         assert!(!c.shared.borrow().binds.is_empty());
@@ -691,6 +775,9 @@ mod tests {
         assert_eq!(c.settings.gaps_in, Gaps::all(1.0));
         assert_eq!(c.settings.border_size, 1);
         assert!(c.settings.curves.contains_key("easy"));
+        assert_eq!(c.settings.active_border.colors.len(), 2);
+        assert_eq!(c.settings.active_border.angle, 45.0);
+        assert_eq!(c.settings.inactive_border.colors.len(), 1);
         // Its bind functions call hl.get_active_window(); they must run, not error.
         let hit = c
             .find_bind(crate::binds::Mods { logo: true, ..Default::default() }, crate::binds::parse_chord("h").unwrap().keysym)
