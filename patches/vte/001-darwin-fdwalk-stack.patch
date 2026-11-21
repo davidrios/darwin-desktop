@@ -1,0 +1,31 @@
+Darwin fdwalk(): size the proc_pidinfo(PROC_PIDLISTFDS) buffer from the fds
+actually open instead of RLIMIT_NOFILE. With a high limit (1048576) the VLA
+was 8 MiB and overflowed the stack: the app crashed spawning its shell.
+Against VTE 0.84.1. Upstream candidate.
+
+--- a/src/missing.cc
++++ b/src/missing.cc
+@@ -228,10 +228,21 @@
+    * It's just a thin wrapper around a syscall, so it's probably okay.
+    */
+   {
+-    char buffer[open_max * PROC_PIDLISTFD_SIZE];
++    /* Size the list from the fds actually open, not from RLIMIT_NOFILE: with
++     * a high limit (1048576 is common) open_max * PROC_PIDLISTFD_SIZE bytes
++     * overflow the stack. A NULL buffer asks for the size; leave room for a
++     * few fds opened in between. Still no malloc, so still safe after fork.
++     */
++    int const needed = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, nullptr, 0);
++    size_t count = needed > 0 ? (size_t)needed / PROC_PIDLISTFD_SIZE + 16 : 0;
++    if (count > (size_t)open_max)
++      count = (size_t)open_max;
++    char buffer[(count > 0 ? count : 1) * PROC_PIDLISTFD_SIZE];
+     ssize_t buffer_size;
+ 
+-    buffer_size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, buffer, sizeof(buffer));
++    buffer_size = count > 0
++      ? proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, buffer, sizeof(buffer))
++      : 0;
+ 
+     if (buffer_size > 0 &&
+         sizeof(buffer) >= (size_t)buffer_size &&

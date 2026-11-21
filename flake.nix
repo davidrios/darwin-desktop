@@ -30,6 +30,7 @@
           gtk4
           gtk4-demos
           compositor
+          vte
           ;
         default = dw.compositor;
       };

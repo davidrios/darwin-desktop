@@ -1,10 +1,9 @@
 //! Compositor state and Smithay protocol handlers.
 //!
 //! The handler structure follows Smithay's `smallvil` example (MIT). Window
-//! policy for M1: a toplevel without a parent fills the output (maximized), a
-//! dialog keeps its own size and is centred, the newest window gets focus.
+//! management (workspaces, tiling, focus) is in `wm.rs`.
 
-use std::{ffi::OsString, process::Child, sync::Arc, time::Instant};
+use std::{cell::Cell, ffi::OsString, process::Child, sync::Arc, time::Instant};
 
 use smithay::{
     desktop::{
@@ -19,14 +18,13 @@ use smithay::{
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::{Interest, LoopHandle, Mode as FdMode, PostAction, generic::Generic},
-        wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
             Client, Display, DisplayHandle, Resource,
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::{wl_buffer, wl_seat, wl_surface::WlSurface},
         },
     },
-    utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size, Transform},
+    utils::{Logical, Point, Rectangle, Serial, Size, Transform},
     wayland::{
         buffer::BufferHandler,
         cursor_shape::CursorShapeManagerState,
@@ -51,7 +49,13 @@ use smithay::{
 
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 
+use crate::{config::Config, wm::Wm};
+
 pub struct State {
+    pub config: Config,
+    pub wm: Wm,
+    /// An exit dispatcher ran: leave at the next frame.
+    pub quit_requested: bool,
     pub start_time: Instant,
     pub display_handle: DisplayHandle,
     pub socket_name: OsString,
@@ -83,7 +87,7 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(display: Display<State>, loop_handle: &LoopHandle<'static, State>) -> State {
+    pub fn new(display: Display<State>, loop_handle: &LoopHandle<'static, State>, config: Config) -> State {
         let dh = display.handle();
 
         let compositor_state = CompositorState::new::<State>(&dh);
@@ -123,6 +127,9 @@ impl State {
             .expect("display source");
 
         State {
+            config,
+            wm: Wm::default(),
+            quit_requested: false,
             start_time: Instant::now(),
             display_handle: dh,
             socket_name,
@@ -159,30 +166,7 @@ impl State {
         );
         self.output.set_preferred(mode);
         self.space.map_output(&self.output, (0, 0));
-        let windows: Vec<Window> = self.space.elements().cloned().collect();
-        for window in windows {
-            self.place(&window);
-        }
-        self.needs_redraw = true;
-    }
-
-    /// M1 policy: parentless toplevels fill the output; dialogs are centred.
-    fn place(&mut self, window: &Window) {
-        let Some(toplevel) = window.toplevel() else { return };
-        if toplevel.parent().is_none() {
-            toplevel.with_pending_state(|s| {
-                s.size = Some(self.output_size);
-                s.states.set(xdg_toplevel::State::Maximized);
-            });
-            self.space.map_element(window.clone(), (0, 0), false);
-        } else {
-            let size = window.geometry().size;
-            let loc = ((self.output_size.w - size.w) / 2, (self.output_size.h - size.h) / 2);
-            self.space.map_element(window.clone(), loc, false);
-        }
-        if toplevel.is_initial_configure_sent() {
-            toplevel.send_pending_configure();
-        }
+        self.relayout();
     }
 
     pub fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
@@ -193,34 +177,9 @@ impl State {
         })
     }
 
-    pub fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
-        self.space.elements().find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface)).cloned()
-    }
-
-    /// Raise, activate and give keyboard focus to a window.
-    pub fn focus(&mut self, window: Option<Window>, serial: Serial) {
-        if let Some(window) = &window {
-            self.space.raise_element(window, true);
-        }
-        for w in self.space.elements() {
-            let active = window.as_ref() == Some(w);
-            w.set_activated(active);
-            if let Some(t) = w.toplevel() {
-                if t.is_initial_configure_sent() {
-                    t.send_pending_configure();
-                }
-            }
-        }
-        let surface = window.and_then(|w| w.toplevel().map(|t| t.wl_surface().clone()));
-        if let Some(keyboard) = self.seat.get_keyboard() {
-            keyboard.set_focus(self, surface, serial);
-        }
-        self.needs_redraw = true;
-    }
-
     fn unconstrain_popup(&self, popup: &PopupSurface) {
         let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(popup.clone())) else { return };
-        let Some(window) = self.window_for_surface(&root) else { return };
+        let Some(window) = self.find_window(&root) else { return };
         let Some(window_loc) = self.space.element_location(&window) else { return };
         // The output in the popup parent's coordinates.
         let mut target = Rectangle::from_size(self.output_size);
@@ -262,13 +221,22 @@ impl CompositorHandler for State {
             while let Some(parent) = get_parent(&root) {
                 root = parent;
             }
-            if let Some(window) = self.window_for_surface(&root) {
+            if let Some(window) = self.find_window(&root) {
                 window.on_commit();
+                if &root == surface {
+                    tracing::trace!(
+                        geometry = ?window.geometry(),
+                        bbox = ?window.bbox(),
+                        location = ?self.space.element_location(&window),
+                        "commit"
+                    );
+                }
             }
         }
 
-        // A toplevel's first commit: decide its size, then send the initial configure.
-        if let Some(window) = self.window_for_surface(surface) {
+        // A toplevel's first commit: tile or float it, then send the initial configure.
+        let pending = self.wm.pending.iter().find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface)).cloned();
+        if let Some(window) = pending {
             let initial_sent = with_states(surface, |states| {
                 states
                     .data_map
@@ -277,11 +245,18 @@ impl CompositorHandler for State {
                     .unwrap_or(true)
             });
             if !initial_sent {
-                self.place(&window);
+                self.manage(window.clone());
                 window.toplevel().unwrap().send_configure();
-            } else if window.toplevel().is_some_and(|t| t.parent().is_some()) {
-                // Dialogs: re-centre once their size is known or changes.
-                self.place(&window);
+            }
+        } else if let Some(window) = self.find_window(surface).filter(|w| self.is_floating_here(w)) {
+            // A floating window is centred once its size is known.
+            window.user_data().insert_if_missing(|| Cell::new(false));
+            let placed = window.user_data().get::<Cell<bool>>().unwrap();
+            let size = window.geometry().size;
+            if !placed.get() && size.w > 0 && size.h > 0 {
+                placed.set(true);
+                let loc = ((self.output_size.w - size.w) / 2, (self.output_size.h - size.h) / 2);
+                self.space.map_element(window.clone(), loc, true);
             }
         }
 
@@ -311,18 +286,15 @@ impl XdgShellHandler for State {
         &mut self.xdg_shell_state
     }
 
+    /// Managed at its first commit, once its parent and size hints are known.
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        let window = Window::new_wayland_window(surface);
-        self.space.map_element(window.clone(), (0, 0), false);
-        self.focus(Some(window), SERIAL_COUNTER.next_serial());
+        self.wm.pending.push(Window::new_wayland_window(surface));
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        if let Some(window) = self.window_for_surface(surface.wl_surface()) {
-            self.space.unmap_elem(&window);
+        if let Some(window) = self.find_window(surface.wl_surface()) {
+            self.unmanage(&window);
         }
-        let top = self.space.elements().last().cloned();
-        self.focus(top, SERIAL_COUNTER.next_serial());
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
@@ -345,7 +317,7 @@ impl XdgShellHandler for State {
         let Some(seat) = Seat::<State>::from_resource(&seat) else { return };
         let kind = PopupKind::Xdg(surface);
         let Ok(root) = find_popup_root_surface(&kind) else { return };
-        if self.window_for_surface(&root).is_none() {
+        if self.find_window(&root).is_none() {
             return;
         }
         let Ok(mut grab) = self.popups.grab_popup(root, kind, &seat, serial) else { return };

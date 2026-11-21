@@ -16,6 +16,8 @@ objc2-metal = "=0.3.2"
 objc2-quartz-core = { version = "=0.3.2", features = ["objc2-metal"] }
 objc2-core-foundation = "=0.3.2"
 block2 = "=0.6.2"
+# Hyprland's Lua config: Lua 5.5, built from the crate's bundled sources.
+mlua = { version = "=0.12.2", features = ["lua55", "vendored"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 

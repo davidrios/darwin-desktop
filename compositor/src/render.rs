@@ -11,7 +11,8 @@ use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBlendFactor, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice,
     MTLDevice, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion,
-    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLSize,
+    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLScissorRect,
+    MTLSize,
     MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
@@ -151,7 +152,10 @@ impl Renderer {
                 continue;
             };
             let surface = toplevel.wl_surface();
+            // A tiled window draws only inside its tile; its popups anywhere.
+            frame.clip(crate::wm::clip_of(window));
             frame.draw_tree(surface, (loc - window.geometry().loc).to_f64());
+            frame.clip(None);
             for (popup, offset) in PopupManager::popups_for_surface(surface) {
                 frame.draw_tree(popup.wl_surface(), (loc + offset - popup.geometry().loc).to_f64());
             }
@@ -254,6 +258,23 @@ struct Frame<'a> {
 }
 
 impl Frame<'_> {
+    /// Restrict drawing to a logical rectangle, or lift the restriction.
+    fn clip(&mut self, rect: Option<smithay::utils::Rectangle<i32, Logical>>) {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let scissor = match rect {
+            None => MTLScissorRect { x: 0, y: 0, width: w, height: h },
+            Some(r) => {
+                // Logical to pixels, clamped to the drawable (Metal requires it).
+                let x0 = ((r.loc.x as f64 * self.scale).round().max(0.0) as usize).min(w);
+                let y0 = ((r.loc.y as f64 * self.scale).round().max(0.0) as usize).min(h);
+                let x1 = (((r.loc.x + r.size.w) as f64 * self.scale).round().max(0.0) as usize).min(w);
+                let y1 = (((r.loc.y + r.size.h) as f64 * self.scale).round().max(0.0) as usize).min(h);
+                MTLScissorRect { x: x0, y: y0, width: x1.saturating_sub(x0), height: y1.saturating_sub(y0) }
+            }
+        };
+        self.encoder.setScissorRect(scissor);
+    }
+
     /// A surface and its subsurfaces, parents first (Smithay's traversal, as
     /// in its `render_elements_from_surface_tree`).
     fn draw_tree(&mut self, surface: &WlSurface, origin: Point<f64, Logical>) {

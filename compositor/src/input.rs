@@ -12,7 +12,11 @@ use smithay::{
     utils::{Logical, Point, SERIAL_COUNTER},
 };
 
-use crate::{keymap::mac_to_evdev, state::State};
+use crate::{
+    binds::{Mods, lower},
+    keymap::mac_to_evdev,
+    state::State,
+};
 
 /// evdev button codes (`linux/input-event-codes.h`).
 pub const BTN_LEFT: u32 = 0x110;
@@ -28,6 +32,8 @@ pub fn event_time(event: &NSEvent) -> InputTime {
 #[derive(Default)]
 pub struct Keys {
     down: HashSet<u32>,
+    /// Keys whose press triggered a bind: their release is swallowed too.
+    bound: HashSet<u32>,
 }
 
 impl Keys {
@@ -39,14 +45,27 @@ impl Keys {
         tracing::debug!(evdev, pressed, "key");
         let Some(keyboard) = state.seat.get_keyboard() else { return };
         let key_state = if pressed { KeyState::Pressed } else { KeyState::Released };
-        keyboard.input::<(), _>(
-            state,
-            Keycode::new(evdev + 8),
-            key_state,
-            SERIAL_COUNTER.next_serial(),
-            time,
-            |_, _, _| FilterResult::Forward,
-        );
+        let bound = &mut self.bound;
+        // Binds are matched on the layout's keysym for the key (its Latin
+        // keysym on non-Latin layouts), with the modifiers held.
+        let hit = keyboard.input(state, Keycode::new(evdev + 8), key_state, SERIAL_COUNTER.next_serial(), time, |state, mods, handle| {
+            if !pressed {
+                return if bound.remove(&evdev) { FilterResult::Intercept(None) } else { FilterResult::Forward };
+            }
+            let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() else { return FilterResult::Forward };
+            match state.config.find_bind(Mods::from(mods), lower(sym)) {
+                Some(hit) => {
+                    bound.insert(evdev);
+                    FilterResult::Intercept(Some(hit))
+                }
+                None => FilterResult::Forward,
+            }
+        });
+        if let Some(Some(hit)) = hit {
+            for action in state.config.run_bind(hit) {
+                state.run_action(action);
+            }
+        }
     }
 
     /// `keyDown:`/`keyUp:` from the event monitor. Returns false for keys with no evdev code.
@@ -121,6 +140,14 @@ pub fn pointer_motion(state: &mut State, location: Point<f64, Logical>, time: In
         state.cursor_status = smithay::input::pointer::CursorImageStatus::default_named();
     }
     let Some(pointer) = state.seat.get_pointer() else { return };
+    // follow_mouse: keyboard focus goes to the window under the pointer.
+    if state.config.settings.follow_mouse >= 1 && !pointer.is_grabbed() {
+        if let Some(window) = state.space.element_under(location).map(|(w, _)| w.clone()) {
+            if state.focused_window().as_ref() != Some(&window) {
+                state.focus(Some(window), SERIAL_COUNTER.next_serial());
+            }
+        }
+    }
     pointer.motion(state, under, &MotionEvent { location, serial: SERIAL_COUNTER.next_serial(), time });
     pointer.frame(state);
 }

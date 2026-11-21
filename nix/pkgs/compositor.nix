@@ -28,6 +28,9 @@ rustPlatform.buildRustPackage {
         (root + "/compositor/Cargo.toml")
         (root + "/compositor/Cargo.lock")
         (root + "/compositor/src")
+        # Config compatibility tests: Hyprland's example and the owner's config.
+        (root + "/compositor/tests")
+        (root + "/docs/exampleconfig.lua")
       ]
       ++ map (q: root + "/third_party/${q}") queues
       ++ map (q: root + "/patches/${q}") queues

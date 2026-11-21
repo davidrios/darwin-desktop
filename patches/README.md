@@ -11,6 +11,7 @@ There are two ways a queue gets applied:
 | `wayland/` | libwayland 1.26.0 release tarball | Nix, `nix/pkgs/wayland.nix` |
 | `libepoxy/` | libepoxy 1.5.10 (nixpkgs) | Nix, `nix/pkgs/libepoxy.nix` |
 | `gtk4/` | GTK 4.24.0 (nixpkgs) | Nix, `nix/pkgs/gtk4.nix` |
+| `vte/` | VTE 0.84.1 (nixpkgs) | Nix, `nix/overlay.nix` |
 
 ## Submodule queues: `scripts/prepare-third-party.sh`
 
@@ -76,3 +77,9 @@ The C libraries come from nixpkgs and are patched in their derivation's `patches
 | `003-mac-bindings-by-backend` | Mac-style key bindings (Meta+C/Z/A…, Ctrl+click as secondary click) only with the macOS backend, so apps use Linux bindings (`decisions.md`, 2026-11-20). 31 blocks in 13 files | Upstream ties these to the backend |
 
 The nix package also removes upstream's "no Wayland on Darwin" line from GTK's `meson.build` (`nix/pkgs/gtk4.nix`, a one-line substitution rather than a patch).
+
+## vte
+
+| Patch | What / why | Drop when |
+|---|---|---|
+| `001-darwin-fdwalk-stack` | Darwin `fdwalk()` sized its `proc_pidinfo(PROC_PIDLISTFDS)` buffer, a stack VLA, from `RLIMIT_NOFILE`; with a high limit (1048576, common in shells) that's 8 MiB and the app crashed spawning its shell. Now sized from the fds actually open (a NULL-buffer call returns the size), still without malloc, so still safe after fork | Upstream fixes it |

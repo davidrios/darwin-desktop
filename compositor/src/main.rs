@@ -7,6 +7,9 @@
 //! Usage: compositor [--fullscreen] [--no-capture] [--keyboard-layout ID] [--dump-keymap] [-- client args...]
 
 mod app;
+mod binds;
+mod config;
+mod dwindle;
 mod capture;
 mod cursor;
 mod input;
@@ -14,6 +17,7 @@ mod keymap;
 mod layout;
 mod render;
 mod state;
+mod wm;
 
 use std::ffi::OsString;
 
@@ -26,6 +30,8 @@ pub struct Options {
     pub capture: bool,
     /// A macOS layout id to use instead of following the current input source.
     pub keyboard_layout: Option<String>,
+    /// The Lua config (default ~/.config/hypr/hyprland.lua).
+    pub config: Option<std::path::PathBuf>,
     /// A client to start once the socket is up, with WAYLAND_DISPLAY set.
     pub command: Vec<OsString>,
 }
@@ -35,7 +41,7 @@ fn main() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    let mut options = Options { fullscreen: false, capture: true, keyboard_layout: None, command: Vec::new() };
+    let mut options = Options { fullscreen: false, capture: true, keyboard_layout: None, config: None, command: Vec::new() };
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -45,6 +51,13 @@ fn main() {
             }
             Some("--fullscreen") => options.fullscreen = true,
             Some("--no-capture") => options.capture = false,
+            Some("--config") => {
+                let Some(path) = args.next() else {
+                    eprintln!("--config needs a path to a hyprland.lua");
+                    std::process::exit(2);
+                };
+                options.config = Some(path.into());
+            }
             Some("--keyboard-layout") => {
                 let Some(id) = args.next().and_then(|a| a.into_string().ok()) else {
                     eprintln!("--keyboard-layout needs a macOS layout id, e.g. com.apple.keylayout.Brazilian-Pro");
@@ -67,8 +80,10 @@ fn main() {
                 return;
             }
             Some("-h" | "--help") => {
-                println!("usage: compositor [--fullscreen] [--no-capture] [--keyboard-layout ID] [--dump-keymap]");
+                println!("usage: compositor [--config hyprland.lua] [--fullscreen] [--no-capture]");
+                println!("                  [--keyboard-layout ID] [--dump-keymap]");
                 println!("                  [-- client-command args...]");
+                println!("Config: Hyprland's Lua config, default ~/.config/hypr/hyprland.lua (SUPER is Cmd).");
                 println!("The keymap is generated from the macOS keyboard layout: the current input");
                 println!("source (followed as it changes), or ID, e.g. com.apple.keylayout.Brazilian-Pro.");
                 println!("--dump-keymap prints the generated xkb keymap (put --keyboard-layout first).");

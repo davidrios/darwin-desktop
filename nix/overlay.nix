@@ -22,6 +22,18 @@ final: prev: {
 
     compositor = self.callPackage ./pkgs/compositor.nix { };
 
+    # Wayland clients for the session.
+    # VTE (GNOME's terminal widget) on our Wayland GTK 4, with its sample terminal app.
+    vte =
+      (prev.vte.override {
+        gtkVersion = "4";
+        gtk4 = self.gtk4;
+        withApp = true;
+      }).overrideAttrs
+        (old: {
+          patches = (old.patches or [ ]) ++ [ ../patches/vte/001-darwin-fdwalk-stack.patch ];
+        });
+
     wl-spike = self.callPackage ../spikes/m0-wayland { };
     wl-spike-test = self.callPackage ../spikes/m0-wayland/test.nix { };
   });

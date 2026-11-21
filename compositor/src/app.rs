@@ -172,7 +172,7 @@ impl App {
     /// One display refresh: draw if anything changed, then let clients draw
     /// their next frame. Returns false when the window has been closed.
     fn frame(&mut self) -> bool {
-        if !self.window.isVisible() {
+        if !self.window.isVisible() || self.state.quit_requested {
             return false;
         }
         self.sync_output();
@@ -400,7 +400,8 @@ pub fn run(mtm: MainThreadMarker, options: Options) {
     // Wayland side.
     let event_loop: EventLoop<'static, State> = EventLoop::try_new().expect("event loop");
     let display: Display<State> = Display::new().expect("Wayland display");
-    let state = State::new(display, &event_loop.handle());
+    let config = crate::config::Config::load(options.config.as_deref());
+    let state = State::new(display, &event_loop.handle(), config);
     let socket = state.socket_name.to_string_lossy().into_owned();
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
     tracing::info!("listening on {socket} (XDG_RUNTIME_DIR={runtime_dir})");
@@ -523,6 +524,15 @@ pub fn run(mtm: MainThreadMarker, options: Options) {
             DELIVER_IMMEDIATELY,
         );
     }
+
+    // The config's top-level hl.exec_cmd calls and hl.on("hyprland.start") hooks.
+    with_app(|app| {
+        let mut actions = app.state.config.take_queue();
+        actions.extend(app.state.config.run_start_hooks());
+        for action in actions {
+            app.state.run_action(action);
+        }
+    });
 
     if !options.command.is_empty() {
         let mut command = Command::new(&options.command[0]);
