@@ -41,9 +41,9 @@ Plan B stays documented because it is the escape hatch if the app-porting cost o
 
 Known costs of Nix here: Darwin is a second-tier platform in nixpkgs, patching a low-level library rebuilds everything above it locally, and the tooling has a learning curve.
 
-### Compositor strategy: two tracks, decision pending
+### Compositor strategy: Track 2 chosen
 
-The latest direction from the project owner is Track 2. Track 1 is kept because its analysis is done and it is the comparison point.
+**Decided 2026-11-21: Track 2, new code on Smithay, no Cocoa-Way fork** (see `decisions.md`). Track 1 is kept because its analysis is done and it is the comparison point.
 
 | | Track 1: port Hyprland | Track 2: reimplement in Metal |
 |---|---|---|
@@ -212,7 +212,7 @@ These came from memory or inference and were not checked:
 
 - Track 1: does ANGLE's Metal backend provide everything Hyprland's shaders use (GLES 3.0 is the stated minimum since 0.50; check extensions such as external images and the blur passes)?
 - Track 1: exact shape of ANGLE's IOSurface binding (texture target, formats, whether it can be an FBO attachment directly).
-- Track 2: does Smithay build and run on current macOS without patches, and which of its backends and helpers assume Linux (DRM, libinput, udev, dmabuf)?
+- Track 2: does Smithay build and run on current macOS without patches, and which of its backends and helpers assume Linux (DRM, libinput, udev, dmabuf)? Answered for the protocol layer (2026-11-21): two small patches needed, one for reis socket flags and one for keymap sharing (`SealedFile`); see `smithay-notes.md`.
 - Is presenting an IOSurface as layer contents fast enough and tear-free at 120 Hz, or is a CAMetalLayer blit needed?
 - Which of the M0 packages does nixpkgs already build for Darwin (wayland, epoll-shim, xkbcommon, the hypr* libraries), and which are marked Linux-only?
 - Does libwayland build cleanly on current macOS with epoll-shim? A Hyprland maintainer thread from April 2025 says Wayland itself builds on Darwin.

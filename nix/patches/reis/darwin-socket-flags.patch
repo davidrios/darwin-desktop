@@ -1,0 +1,65 @@
+Build on Darwin: no MSG_NOSIGNAL (use SO_NOSIGPIPE on the socket) and no
+MSG_CMSG_CLOEXEC (set FD_CLOEXEC on received fds). Against reis 0.7.1.
+Smithay master depends on reis unconditionally. Upstream candidate.
+
+--- a/src/util.rs
++++ b/src/util.rs
+@@ -37,7 +37,15 @@
+     let mut cmsg_space = vec![MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(fds.len()))];
+     let mut cmsg_buffer = net::SendAncillaryBuffer::new(&mut cmsg_space);
+     cmsg_buffer.push(net::SendAncillaryMessage::ScmRights(fds));
+-    retry_on_intr(|| net::sendmsg(socket, buf, &mut cmsg_buffer, net::SendFlags::NOSIGNAL))
++    #[cfg(not(target_vendor = "apple"))]
++    let flags = net::SendFlags::NOSIGNAL;
++    // Darwin has no MSG_NOSIGNAL; suppress SIGPIPE per socket instead.
++    #[cfg(target_vendor = "apple")]
++    let flags = {
++        let _ = rustix::net::sockopt::set_socket_nosigpipe(socket, true);
++        net::SendFlags::empty()
++    };
++    retry_on_intr(|| net::sendmsg(socket, buf, &mut cmsg_buffer, flags))
+ }
+ 
+ pub fn recv_with_fds(
+@@ -55,7 +63,7 @@
+             socket,
+             &mut [IoSliceMut::new(buf)],
+             &mut cmsg_buffer,
+-            net::RecvFlags::CMSG_CLOEXEC,
++            recv_flags(),
+         )
+     })?;
+     if response.bytes != 0 {
+@@ -66,7 +74,8 @@
+                     net::RecvAncillaryMessage::ScmRights(fds) => Some(fds),
+                     _ => None,
+                 })
+-                .flatten(),
++                .flatten()
++                .inspect(set_cloexec_after_recv),
+         );
+     }
+     Ok(response.bytes)
+@@ -147,3 +156,22 @@
+     let time = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+     time.tv_sec as u64 * 1_000_000 + time.tv_nsec as u64 / 1_000
+ }
++
++#[cfg(not(target_vendor = "apple"))]
++fn recv_flags() -> net::RecvFlags {
++    net::RecvFlags::CMSG_CLOEXEC
++}
++
++// Darwin has no MSG_CMSG_CLOEXEC: receive normally, then mark each fd close-on-exec.
++#[cfg(target_vendor = "apple")]
++fn recv_flags() -> net::RecvFlags {
++    net::RecvFlags::empty()
++}
++
++#[cfg(not(target_vendor = "apple"))]
++fn set_cloexec_after_recv(_fd: &OwnedFd) {}
++
++#[cfg(target_vendor = "apple")]
++fn set_cloexec_after_recv(fd: &OwnedFd) {
++    let _ = rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC);
++}

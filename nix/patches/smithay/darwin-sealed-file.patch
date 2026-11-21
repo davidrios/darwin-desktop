@@ -1,0 +1,106 @@
+SealedFile on Apple platforms: use an unlinked temporary file with a read-only
+descriptor. POSIX shm objects on macOS reject write(2) (ENXIO) and can't be
+mapped MAP_PRIVATE (EINVAL), which Wayland clients use for keymaps.
+Against Smithay a38bb709 (master, 2026-11-19). Upstream candidate.
+
+--- a/src/utils/sealed_file.rs
++++ b/src/utils/sealed_file.rs
+@@ -10,9 +10,12 @@
+ /// This mechanism is useful for giving clients access to large amounts of
+ /// information such as keymaps without them being able to write to the handle.
+ ///
+-/// On Linux, Android, and FreeBSD, this uses a sealed memfd. On other platforms
+-/// it creates a POSIX shared memory object with `shm_open`, opens a read-only
+-/// copy, and unlinks it.
++/// On Linux, Android, and FreeBSD, this uses a sealed memfd. On Apple platforms
++/// it writes a temporary file, opens a read-only copy, and unlinks it: POSIX
++/// shared memory objects there can't be written with write(2) and can't be
++/// mapped `MAP_PRIVATE`, which Wayland clients use for keymaps. On other
++/// platforms it creates a POSIX shared memory object with `shm_open`, opens a
++/// read-only copy, and unlinks it.
+ #[derive(Debug)]
+ pub struct SealedFile {
+     file: File,
+@@ -51,9 +54,62 @@
+     }
+ 
+     /// Create a `[SealedFile]` with the given binary data.
+-    #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "android")))]
++    #[cfg(target_vendor = "apple")]
+     pub fn with_data(name: &CStr, data: &[u8]) -> Result<Self, std::io::Error> {
+         use rand::{RngExt, distr::Alphanumeric};
++        use std::{fs::OpenOptions, io::ErrorKind, os::unix::fs::OpenOptionsExt};
++
++        let mut rng = rand::rng();
++        let dir = std::env::temp_dir();
++
++        // Create a private file with a randomized name; retry a few times if it exists.
++        let mut n = 0;
++        let (path, mut file) = loop {
++            let mut file_name = name.to_string_lossy().into_owned();
++            file_name.push('-');
++            file_name.extend((0..10).map(|_| rng.sample(Alphanumeric) as char));
++            let path = dir.join(file_name);
++            match OpenOptions::new()
++                .read(true)
++                .write(true)
++                .create_new(true)
++                .mode(0o600)
++                .custom_flags(rustix::fs::OFlags::CLOEXEC.bits() as i32)
++                .open(&path)
++            {
++                Ok(file) => break (path, file),
++                Err(err) if err.kind() == ErrorKind::AlreadyExists && n < 4 => n += 1,
++                Err(err) => return Err(err),
++            }
++        };
++        // Unlink however we leave this function.
++        let _unlink = scopeguard_unlink(&path);
++
++        file.write_all(data)?;
++        file.flush()?;
++
++        // Sealing isn't available, so hand out a read-only descriptor. After the unlink, no
++        // other process can open the file for writing.
++        let file_rdonly = OpenOptions::new()
++            .read(true)
++            .custom_flags(rustix::fs::OFlags::CLOEXEC.bits() as i32)
++            .open(&path)?;
++
++        Ok(Self {
++            file: file_rdonly,
++            size: data.len(),
++        })
++    }
++
++    /// Create a `[SealedFile]` with the given binary data.
++    #[cfg(not(any(
++        target_os = "linux",
++        target_os = "freebsd",
++        target_os = "android",
++        target_vendor = "apple"
++    )))]
++    pub fn with_data(name: &CStr, data: &[u8]) -> Result<Self, std::io::Error> {
++        use rand::{RngExt, distr::Alphanumeric};
+         use rustix::{
+             io::Errno,
+             shm::{self, Mode},
+@@ -101,6 +157,18 @@
+     }
+ }
+ 
++/// Removes a path when dropped.
++#[cfg(target_vendor = "apple")]
++fn scopeguard_unlink(path: &std::path::Path) -> impl Drop + '_ {
++    struct Unlink<'a>(&'a std::path::Path);
++    impl Drop for Unlink<'_> {
++        fn drop(&mut self) {
++            let _ = std::fs::remove_file(self.0);
++        }
++    }
++    Unlink(path)
++}
++
+ impl AsRawFd for SealedFile {
+     fn as_raw_fd(&self) -> RawFd {
+         self.file.as_raw_fd()

@@ -2,6 +2,18 @@
 
 Newest first. Each entry: what was decided, why, and what it implies. Earlier decisions are recorded in `PROJECT_OUTLINE.md` section 2.
 
+## 2026-11-21: Track 2, a new compositor on Smithay
+
+**Decision:** The compositor is new code built on Smithay for the Wayland protocol layer. Cocoa-Way is not forked; it remains a reference to study and a test display, and none of its code is copied.
+
+**Why:** Smithay (MIT) covers the largest and least project-specific part (protocol state for xdg-shell, layer-shell, data device, seat, output and so on). What's specific to this project is ours to write: Metal renderer, IOSurface buffers, AppKit window and input (later IOHID and the framebuffer), Hyprland-style layouts, workspaces, animations, keybinds and config. Not forking keeps the licence choice open (Cocoa-Way is GPL-3.0) and avoids inheriting its container/waypipe product scope.
+
+**Implications:**
+- Track 1 (Hyprland/aquamarine port) is no longer the plan; its analysis stays in the outline as the comparison point.
+- Language is Rust (Smithay's language). Dependencies are pinned exactly (the compositor is distributed as a binary).
+- Any Darwin fixes Smithay needs go upstream where possible, otherwise carry them as patches in the flake.
+- Licence of the new code: not decided yet.
+
 ## 2026-11-20: apps use Linux shortcuts; Cmd belongs to the compositor
 
 **Decision:** Wayland apps in the session use the standard Linux key bindings (Ctrl+C, Ctrl+V, Ctrl+Z, Ctrl+A). Cmd reaches clients as evdev `KEY_LEFTMETA`/`KEY_RIGHTMETA` (xkb Super), which is free to serve as the compositor's main modifier, the way Super does in Hyprland.
