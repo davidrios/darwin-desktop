@@ -8,6 +8,7 @@
 
 mod app;
 mod capture;
+mod cursor;
 mod input;
 mod keymap;
 mod render;

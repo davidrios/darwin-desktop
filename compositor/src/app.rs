@@ -21,13 +21,13 @@ use std::{
 
 use block2::RcBlock;
 use objc2::{
-    MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
     rc::Retained,
     runtime::{AnyObject, NSObject},
     sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask, NSEventType, NSResponder,
+    NSApplication, NSCursor, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask, NSEventType, NSResponder,
     NSScreen, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::{
@@ -45,6 +45,7 @@ use smithay::{
 use crate::{
     Options,
     capture::Capture,
+    cursor::{self, CursorKey},
     input::{self, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, Keys, event_time},
     render::Renderer,
     state::State,
@@ -57,6 +58,7 @@ pub struct App {
     state: State,
     renderer: Renderer,
     keys: Keys,
+    cursor: Option<CursorKey>,
     window: Retained<NSWindow>,
     view: Retained<CompositorView>,
     /// Kept alive for the life of the app.
@@ -114,6 +116,29 @@ impl App {
         self.state.set_output_size(size, scale, refresh);
     }
 
+    /// Show the client's cursor if it changed.
+    fn apply_cursor(&mut self) {
+        let key = cursor::key(&self.state.cursor_status);
+        if self.cursor.as_ref() == Some(&key) {
+            return;
+        }
+        let ns = cursor::ns_cursor(&self.state.cursor_status);
+        tracing::debug!(?key, image = ns.is_some(), "cursor");
+        self.cursor = Some(key);
+        // Applied now if the pointer is over the view; cursor rects keep it
+        // when AppKit resets the cursor (entering the window, after a drag).
+        let inside = {
+            let p = self.window.mouseLocationOutsideOfEventStream();
+            let p = self.view.convertPoint_fromView(p, None);
+            self.view.mouse_inRect(p, self.view.bounds())
+        };
+        if inside && self.window.isKeyWindow() {
+            ns.clone().unwrap_or_else(NSCursor::arrowCursor).set();
+        }
+        *self.view.ivars().cursor.borrow_mut() = ns;
+        self.window.invalidateCursorRectsForView(&self.view);
+    }
+
     /// One display refresh: draw if anything changed, then let clients draw
     /// their next frame. Returns false when the window has been closed.
     fn frame(&mut self) -> bool {
@@ -133,10 +158,18 @@ impl App {
             self.renderer.render(&self.state);
         }
 
+        self.apply_cursor();
+
         let now = self.state.start_time.elapsed();
         let output = self.state.output.clone();
         for window in self.state.space.elements() {
             window.send_frame(&output, now, Some(Duration::ZERO), |_, _| Some(output.clone()));
+        }
+        // Animated cursors wait for frame callbacks too.
+        if let smithay::input::pointer::CursorImageStatus::Surface(surface) = &self.state.cursor_status {
+            smithay::desktop::utils::send_frames_surface_tree(surface, &output, now, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
         }
         self.state.space.refresh();
         self.state.popups.cleanup();
@@ -145,14 +178,28 @@ impl App {
     }
 }
 
+#[derive(Default)]
+pub struct ViewIvars {
+    /// The client's cursor (`None`: the arrow).
+    cursor: RefCell<Option<Retained<NSCursor>>>,
+}
+
 define_class!(
     /// The window's content: hosts the renderer's `CAMetalLayer` and takes the pointer.
     #[unsafe(super(NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "DarwinDesktopCompositorView"]
+    #[ivars = ViewIvars]
     pub struct CompositorView;
 
     impl CompositorView {
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            if let Some(cursor) = &*self.ivars().cursor.borrow() {
+                self.addCursorRect_cursor(self.bounds(), cursor);
+            }
+        }
+
         /// Wayland's y axis points down.
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
@@ -240,7 +287,7 @@ define_class!(
 
 impl CompositorView {
     fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(());
+        let this = Self::alloc(mtm).set_ivars(ViewIvars::default());
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
 
@@ -393,6 +440,7 @@ pub fn run(mtm: MainThreadMarker, options: Options) {
             state,
             renderer,
             keys: Keys::default(),
+            cursor: None,
             window: window.clone(),
             view: view.clone(),
             _display_link: display_link,

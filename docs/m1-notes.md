@@ -17,19 +17,19 @@ cd compositor && cargo run -- $(nix build --no-link --print-out-paths ..#gtk4-de
 
 | Piece | File | How |
 |---|---|---|
-| Protocols | `state.rs` | Smithay (patched submodule): wl_compositor, wl_subcompositor, wl_shm, xdg_shell with popup grabs, wl_seat, wl_output + xdg-output, wl_data_device. Handler structure after Smithay's smallvil. |
+| Protocols | `state.rs` | Smithay (patched submodule): wl_compositor, wl_subcompositor, wl_shm, xdg_shell with popup grabs, wl_seat, wl_output + xdg-output, wl_data_device, wp_cursor_shape_v1. Handler structure after Smithay's smallvil. |
 | Window policy | `state.rs` | Parentless toplevels fill the output (maximized); dialogs keep their size, centred; newest window and clicked window get focus. |
 | Event loop | `app.rs` | AppKit owns the main thread. calloop's kqueue fd is a `CFFileDescriptor` on the main run loop; readable means dispatch with zero timeout, then flush clients. Single-threaded; state in a thread-local, with re-entrancy guarded. |
 | Frames | `app.rs` | `NSView`'s `CADisplayLink` (display refresh rate). Each tick: follow window size/scale, redraw if anything committed, send frame callbacks, refresh the space. |
 | Renderer | `render.rs` | Layer-hosting view on a `CAMetalLayer` (BGRA8). Each surface's shm buffer is uploaded to a texture when its commit counter changes (cached in the surface's data map) and drawn as a quad; premultiplied blending; XRGB forces alpha 1. Subsurfaces and popups placed as Smithay's own renderer does. |
 | Keyboard | `input.rs`, `keymap.rs` | A local `NSEvent` monitor takes key down/up and flags changed for our window (AppKit sends no keyUp while Cmd is held; mitsuami does the same). macOS key codes to evdev (table generated from mitsuami-core's tables). Modifiers from the device-dependent flag bits; Caps Lock as press+release; held keys released when the window loses key status. xkb keymap is libxkbcommon's default (us). |
 | Keyboard capture | `capture.rs` | While the window is key, the window server's hot key mode is "all disabled but Universal Access" (`CGSSetGlobalHotKeyOperatingMode`, looked up with `dlsym`), restored when it isn't; presentation options as fallback. `--no-capture` turns it off. Key events log at `RUST_LOG=compositor::input=debug`. |
+| Cursor | `cursor.rs`, `app.rs` | cursor-shape protocol shapes map to macOS's own cursors (macOS 15 frame-resize, column/row-resize and zoom cursors where present, as in mitsuami); cursor surfaces become an image `NSCursor` with the client's hotspot at the buffer's scale; hidden is a transparent cursor. Applied each frame when it changes, kept through `resetCursorRects`. GTK 4.24 uses cursor-shape (checked by hand). |
 | Pointer | `app.rs`, `input.rs` | View's mouse events in flipped view coordinates (= Wayland logical); buttons to `BTN_*`; precise scrolling as finger axis with stop at gesture end, wheel as v120. |
 | Output | `state.rs` | One `wl_output` = the view: logical size in points, integer scale from `backingScaleFactor`, refresh from the screen's `maximumFramesPerSecond`. |
 
 ## Known gaps (next)
 
-- **Cursor:** client cursor surfaces and cursor-shape are ignored; the macOS arrow shows everywhere.
 - **Clipboard:** only between Wayland clients; no bridge to the macOS pasteboard.
 - **Text input:** no input methods, dead keys or compose; keymap fixed to xkb's default `us`.
 - **Damage:** every frame with a commit re-uploads changed buffers whole and redraws everything.

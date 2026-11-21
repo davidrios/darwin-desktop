@@ -116,6 +116,10 @@ pub fn is_quit_chord(event: &NSEvent) -> bool {
 pub fn pointer_motion(state: &mut State, location: Point<f64, Logical>, time: InputTime) {
     state.pointer_location = location;
     let under = state.surface_under(location);
+    if under.is_none() {
+        // Over no client: the default cursor (clients set theirs on enter).
+        state.cursor_status = smithay::input::pointer::CursorImageStatus::default_named();
+    }
     let Some(pointer) = state.seat.get_pointer() else { return };
     pointer.motion(state, under, &MotionEvent { location, serial: SERIAL_COUNTER.next_serial(), time });
     pointer.frame(state);

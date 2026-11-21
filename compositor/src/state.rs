@@ -14,7 +14,7 @@ use smithay::{
     input::{
         Seat, SeatHandler, SeatState,
         dnd::{DnDGrab, DndGrabHandler, GrabType, Source},
-        pointer::{CursorImageStatus, Focus},
+        pointer::{CursorIcon, CursorImageStatus, Focus},
     },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
@@ -29,6 +29,7 @@ use smithay::{
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size, Transform},
     wayland::{
         buffer::BufferHandler,
+        cursor_shape::CursorShapeManagerState,
         compositor::{
             CompositorClientState, CompositorHandler, CompositorState, get_parent, is_sync_subsurface,
             with_states,
@@ -71,6 +72,10 @@ pub struct State {
     pub data_device_state: DataDeviceState,
     pub seat: Seat<State>,
 
+    /// Keeps the cursor-shape global alive.
+    pub _cursor_shape_state: CursorShapeManagerState,
+    /// What the client under the pointer wants as cursor.
+    pub cursor_status: CursorImageStatus,
     pub pointer_location: Point<f64, Logical>,
     /// Something changed on screen since the last frame.
     pub needs_redraw: bool,
@@ -86,6 +91,7 @@ impl State {
         let shm_state = ShmState::new::<State>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&dh);
         let data_device_state = DataDeviceState::new::<State>(&dh);
+        let cursor_shape_state = CursorShapeManagerState::new::<State>(&dh);
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<State> = seat_state.new_wl_seat(&dh, "seat0");
@@ -132,6 +138,8 @@ impl State {
             seat_state,
             data_device_state,
             seat,
+            _cursor_shape_state: cursor_shape_state,
+            cursor_status: CursorImageStatus::Named(CursorIcon::Default),
             pointer_location: (0.0, 0.0).into(),
             needs_redraw: true,
             children: Vec::new(),
@@ -374,14 +382,21 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    /// M1 keeps the macOS arrow cursor; client cursor surfaces are ignored.
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+    /// Applied as an `NSCursor` on the next frame (app.rs, cursor.rs).
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.cursor_status = image;
+    }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let dh = &self.display_handle;
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client);
     }
+}
+
+/// Required by the cursor-shape protocol (shapes can be set for tablet tools too).
+impl smithay::input::tablet::TabletSeatHandler for State {
+    type ToolFocus = WlSurface;
 }
 
 /// Required for `WlSurface` as pointer focus; no constraints are offered yet.
