@@ -14,23 +14,28 @@ There are two ways a queue gets applied:
 
 ## Submodule queues: `scripts/prepare-third-party.sh`
 
-The Rust crates are built from `third_party/<name>`, a submodule pinned by the superproject. Prepare, per queue:
+The Rust crates are built from patched copies. The submodules `third_party/<name>` stay pristine at the commit the superproject pins; prepare, per queue:
 
 1. Checks that the submodule sits at the pinned commit (a queue written for one commit says nothing about another).
-2. Restores every tracked file any patch touches to that commit and deletes every file a patch creates.
-3. Applies the queue in filename order with `git apply`, checking each patch first. A patch that doesn't apply stops the run and prints why.
+2. Exports that commit with `git archive` into `build/third_party/<name>` (gitignored), so stray edits in the submodule can't leak in.
+3. Applies the queue in filename order with `patch -p1`, dry-running each patch first. A patch that doesn't apply stops the run and prints why.
+4. Writes a stamp (commit + patch hashes). The next run skips a tree whose stamp matches, so Cargo doesn't rebuild the crate for nothing; `-f` forces a rebuild.
 
-So every run starts from pristine files and is idempotent. **Don't edit files under `third_party/` by hand between runs, and don't `git checkout` them**; change the patch and rerun. The submodules are marked `ignore = dirty`, so their patched state doesn't show in the superproject's `git status`.
+`compositor/Cargo.toml` points at `build/third_party/`. The Nix package (`nix/pkgs/compositor.nix`) reads the pristine submodules from the flake source (`inputs.self.submodules = true`) and makes the same copies with the same queues.
+
+**Don't edit `build/third_party/` or the submodules by hand**; change the patch and rerun.
 
 After cloning: `git submodule update --init && scripts/prepare-third-party.sh`.
 
-**Writing or refreshing a patch.** Run prepare, edit the files in the tree, then write the diff of just your files:
+**Writing or refreshing a patch.** Edit in the submodule (it's a normal git checkout), then write the diff of just your files and put the submodule back:
 
 ```
 git -C third_party/smithay diff -- src/utils/sealed_file.rs > patches/smithay/00N-what.patch
+git -C third_party/smithay checkout .
+scripts/prepare-third-party.sh
 ```
 
-If an earlier patch in the queue touches the same file, that diff contains both changes; fold yours into that patch instead, or diff against a copy of the file taken after prepare. Add the what/why paragraph at the top, then **check it by running prepare again from scratch**: a forward apply onto pristine files is the only check that proves anything. New files need a `--- /dev/null` header (`git diff` produces one for files added with `git add -N`).
+With earlier patches in the queue touching the same file, apply them in the submodule first (`git -C third_party/<name> apply ../../patches/<name>/00[1-M]*.patch`), make your change, and diff against that state (`git -C third_party/<name> stash` the result, or diff two copies). Add the what/why paragraph at the top. The check that proves a patch is prepare applying the whole queue to the pristine export. New files need a `--- /dev/null` header (`git add -N` makes `git diff` produce one).
 
 **Moving the pin.** `git -C third_party/<name> checkout <new>`, run prepare, fix or drop what no longer applies, review the Drop column, commit the new pin together with the queue.
 

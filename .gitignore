@@ -6,3 +6,4 @@ result-*
 *.dSYM/
 .DS_Store
 /compositor/target/
+/build/

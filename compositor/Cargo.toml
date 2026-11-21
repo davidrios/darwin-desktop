@@ -8,7 +8,7 @@ publish = false
 
 # Distributed as a binary: every dependency is pinned exactly.
 [dependencies]
-smithay = { path = "../third_party/smithay", default-features = false, features = ["wayland_frontend", "desktop"] }
+smithay = { path = "../build/third_party/smithay", default-features = false, features = ["wayland_frontend", "desktop"] }
 objc2 = "=0.6.5"
 objc2-foundation = "=0.3.2"
 objc2-app-kit = { version = "=0.3.2", features = ["block2", "objc2-quartz-core", "objc2-core-foundation"] }
@@ -21,4 +21,4 @@ tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 
 # Patched sources (patches/README.md): run scripts/prepare-third-party.sh first.
 [patch.crates-io]
-reis = { path = "../third_party/reis" }
+reis = { path = "../build/third_party/reis" }

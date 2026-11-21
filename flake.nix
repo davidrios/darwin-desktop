@@ -2,6 +2,8 @@
   description = "Darwin Wayland desktop: a Hyprland-style Wayland session on Apple Silicon macOS";
 
   inputs = {
+    # Include the third_party/ submodules (Smithay, reis) in the flake's source.
+    self.submodules = true;
     # Pinned exactly through flake.lock. Update deliberately with `nix flake update`.
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
@@ -27,12 +29,14 @@
           libepoxy
           gtk4
           gtk4-demos
+          compositor
           ;
-        default = dw.wl-spike;
+        default = dw.compositor;
       };
 
       checks.${system} = {
         wl-spike = dw.wl-spike-test;
+        compositor = dw.compositor; # builds and runs its unit tests
       };
 
       devShells.${system}.default = pkgs.mkShell {

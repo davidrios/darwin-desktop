@@ -20,6 +20,8 @@ final: prev: {
     gtk4 = self.callPackage ./pkgs/gtk4.nix { inherit (prev) gtk4; };
     gtk4-demos = self.callPackage ./pkgs/gtk4-demos.nix { };
 
+    compositor = self.callPackage ./pkgs/compositor.nix { };
+
     wl-spike = self.callPackage ../spikes/m0-wayland { };
     wl-spike-test = self.callPackage ../spikes/m0-wayland/test.nix { };
   });

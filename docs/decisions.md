@@ -8,13 +8,13 @@ Newest first. Each entry: what was decided, why, and what it implies. Earlier de
 
 ## 2026-11-21: third-party changes are carried as patch queues
 
-**Decision:** Every change to someone else's code lives in `patches/<project>/NNN-*.patch`, documented in `patches/README.md` (what, why, drop when), the way 2ksbox carries QEMU. Rust dependencies we patch (Smithay, reis) are pinned submodules in `third_party/`, patched by `scripts/prepare-third-party.sh` and used through Cargo path dependencies. C libraries from nixpkgs keep being patched in their Nix derivations, from the same `patches/` tree.
+**Decision:** Every change to someone else's code lives in `patches/<project>/NNN-*.patch`, documented in `patches/README.md` (what, why, drop when), the way 2ksbox carries QEMU. Rust dependencies we patch (Smithay, reis) are pinned, pristine submodules in `third_party/`; `scripts/prepare-third-party.sh` exports each pinned commit to `build/third_party/<name>` and applies the queue there, and Cargo uses those copies through path dependencies. The Nix package does the same from the flake source (`inputs.self.submodules = true`). C libraries from nixpkgs keep being patched in their Nix derivations, from the same `patches/` tree.
 
 **Why:** One place to see every divergence from upstream and when it can go. Deterministic prepare (restore, then apply in order) means a half-applied tree can't slip through. No public forks are needed; upstream PRs remain possible and drop a patch when merged.
 
 **Implications:**
 - After cloning: `git submodule update --init && scripts/prepare-third-party.sh`.
-- The compositor's Nix build will need the submodule sources plus the queue (to be wired up with the M1 crate).
+- `nix build .#compositor` (the flake's default package) builds it the same way.
 
 ## 2026-11-21: Track 2, a new compositor on Smithay
 

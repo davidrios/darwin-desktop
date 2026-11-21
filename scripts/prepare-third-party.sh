@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
-# Prepare the patched third-party source trees: for every submodule under
-# third_party/<name> that has a queue in patches/<name>/, restore the files the
-# queue touches to the pinned commit and apply the queue in filename order.
+# Build the patched third-party trees: for every submodule third_party/<name>
+# with a queue in patches/<name>/, export the pinned commit into
+# build/third_party/<name> and apply the queue in filename order.
 #
-# Deterministic and idempotent: each run starts from pristine files, so a
-# partially applied or hand-edited tree can't slip through. Never fix up files
-# inside third_party/ by hand between runs; edit the patch instead.
+# The submodules themselves stay pristine (the Nix build reads them as they are
+# and applies the same queue). Deterministic: the copy comes from `git archive`
+# of the pinned commit, so stray edits in the submodule can't leak in. A stamp
+# (commit + patch hashes) skips the work when nothing changed, so Cargo doesn't
+# rebuild the crate for nothing. Never edit build/third_party by hand: change
+# the patch and rerun.
 #
-# Usage: scripts/prepare-third-party.sh [name...]   (default: every queue with a submodule)
+# Usage: scripts/prepare-third-party.sh [-f] [name...]   (default: every queue with a submodule)
+#   -f  rebuild even if the stamp matches
 #
-# The queues in patches/ that have no submodule (wayland, libepoxy, gtk4) are
-# applied by their Nix packages, not by this script. See patches/README.md.
+# Queues without a submodule (wayland, libepoxy, gtk4) are applied by their Nix
+# packages. See patches/README.md.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Paths a patch touches ('+++ b/x') and creates ('--- /dev/null' then '+++ b/x').
-patched_files() { sed -n 's|^+++ b/||p' "$@" | sort -u; }
-created_files() { awk '/^--- \/dev\/null/ { getline; sub(/^\+\+\+ b\//, ""); print }' "$@" | sort -u; }
+force=0
+if [ "${1:-}" = "-f" ]; then force=1; shift; fi
 
 if [ $# -gt 0 ]; then
   names=("$@")
@@ -32,42 +35,42 @@ fi
 
 for name in "${names[@]}"; do
   tree="third_party/$name"
+  out="build/third_party/$name"
   queue=("$ROOT"/patches/"$name"/*.patch)
   [ -e "$tree/.git" ] || { echo "$tree missing: git submodule update --init $tree"; exit 1; }
-  [ -e "${queue[0]}" ] || { echo "patches/$name: no patches"; continue; }
+  [ -e "${queue[0]}" ] || queue=()
 
-  # The tree must sit at the commit the superproject pins; a queue written
-  # for one upstream commit says nothing about another.
+  # The submodule must sit at the commit the superproject pins: a queue
+  # written for one upstream commit says nothing about another.
   pinned="$(git ls-tree HEAD "$tree" | awk '{print $3}')"
-  if [ -n "$pinned" ]; then
-    actual="$(git -C "$tree" rev-parse HEAD)"
-    if [ "$actual" != "$pinned" ]; then
-      echo "$tree is at ${actual:0:12}, the superproject pins ${pinned:0:12}."
-      echo "  git submodule update $tree   (or commit the new pin and refresh the queue)"
-      exit 1
-    fi
+  actual="$(git -C "$tree" rev-parse HEAD)"
+  if [ -n "$pinned" ] && [ "$actual" != "$pinned" ]; then
+    echo "$tree is at ${actual:0:12}, the superproject pins ${pinned:0:12}."
+    echo "  git submodule update $tree   (or commit the new pin and refresh the queue)"
+    exit 1
   fi
 
-  echo "==> $name ($(git -C "$tree" rev-parse --short HEAD))"
-
-  # Restore every tracked file any patch touches; delete files patches create.
-  restore=()
-  while IFS= read -r f; do restore+=("$f"); done < <(patched_files "${queue[@]}")
-  if [ ${#restore[@]} -gt 0 ]; then
-    tracked=()
-    while IFS= read -r f; do tracked+=("$f"); done < <(git -C "$tree" ls-files -- "${restore[@]}")
-    [ ${#tracked[@]} -gt 0 ] && git -C "$tree" checkout -q -- "${tracked[@]}"
+  stamp="$actual $( [ ${#queue[@]} -gt 0 ] && shasum -a 256 "${queue[@]}" | awk '{print $1}' | tr '\n' ' ')"
+  if [ "$force" = 0 ] && [ -f "$out/.prepared" ] && [ "$(cat "$out/.prepared")" = "$stamp" ]; then
+    echo "==> $name (${actual:0:8}): up to date"
+    continue
   fi
-  while IFS= read -r f; do rm -f "$tree/$f"; done < <(created_files "${queue[@]}")
+
+  echo "==> $name (${actual:0:8}) -> $out"
+  rm -rf "$out"
+  mkdir -p "$out"
+  git -C "$tree" archive --format=tar "$actual" | tar -x -C "$out"
 
   for p in "${queue[@]}"; do
-    if err="$(git -C "$tree" apply --check "$p" 2>&1)"; then
-      git -C "$tree" apply "$p"
+    if err="$(patch -p1 --dry-run --silent -d "$out" < "$p" 2>&1)"; then
+      patch -p1 --silent --no-backup-if-mismatch -d "$out" < "$p"
       echo "    $(basename "$p"): applied"
     else
       echo "    $(basename "$p"): DOES NOT APPLY"
       printf '%s\n' "$err" | sed 's/^/      /'
+      rm -rf "$out"
       exit 1
     fi
   done
+  printf '%s\n' "$stamp" > "$out/.prepared"
 done

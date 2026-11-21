@@ -5,6 +5,7 @@
 `compositor/` (Rust, MIT OR Apache-2.0) runs the GTK 4 widget factory as a Wayland client in its own window, drawn with Metal, and it's usable: checked by hand (drawing at Retina scale, pointer, scrolling, keyboard and shortcuts, menus and popovers, live resize, full screen, Cmd+Shift+Q). This replaces Cocoa-Way as the test display.
 
 ```
+nix build                             # the compositor (flake default package): result/bin/compositor
 nix develop
 scripts/prepare-third-party.sh        # once after cloning, and after changing a queue
 cd compositor && cargo run -- $(nix build --no-link --print-out-paths ..#gtk4-demos)/bin/gtk4-widget-factory
@@ -35,4 +36,3 @@ cd compositor && cargo run -- $(nix build --no-link --print-out-paths ..#gtk4-de
 - **Scale:** integer output scale only; no fractional-scale or viewporter protocols.
 - **Smithay logs `surface missing from known popups`** when GTK commits a surface whose `xdg_popup` is already gone (GTK keeps the `wl_surface` when hiding a popover). Harmless so far; check against upstream Smithay.
 - **GTK frame-timing warnings** (`gdk_frame_timings_*`), as under Cocoa-Way: no presentation-time feedback yet.
-- **Nix package:** the compositor builds with cargo in the dev shell; a flake package (submodule sources plus queue) is still to do.
