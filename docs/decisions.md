@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what was decided, why, and what it implies. Earlier decisions are recorded in `PROJECT_OUTLINE.md` section 2.
 
+## 2026-11-21: licence MIT OR Apache-2.0
+
+**Decision:** This project's own code is dual-licensed MIT OR Apache-2.0, as is usual in the Rust ecosystem (`LICENSE-MIT`, `LICENSE-APACHE`). Third-party code keeps its own licence: patches in `patches/` follow their upstream's.
+
 ## 2026-11-21: third-party changes are carried as patch queues
 
 **Decision:** Every change to someone else's code lives in `patches/<project>/NNN-*.patch`, documented in `patches/README.md` (what, why, drop when), the way 2ksbox carries QEMU. Rust dependencies we patch (Smithay, reis) are pinned submodules in `third_party/`, patched by `scripts/prepare-third-party.sh` and used through Cargo path dependencies. C libraries from nixpkgs keep being patched in their Nix derivations, from the same `patches/` tree.
@@ -22,7 +26,7 @@ Newest first. Each entry: what was decided, why, and what it implies. Earlier de
 - Track 1 (Hyprland/aquamarine port) is no longer the plan; its analysis stays in the outline as the comparison point.
 - Language is Rust (Smithay's language). Dependencies are pinned exactly (the compositor is distributed as a binary).
 - Any Darwin fixes Smithay needs go upstream where possible, otherwise carry them as patches in the flake.
-- Licence of the new code: not decided yet.
+- Licence of the new code: MIT OR Apache-2.0 (entry above).
 
 ## 2026-11-20: apps use Linux shortcuts; Cmd belongs to the compositor
 

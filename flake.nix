@@ -46,7 +46,16 @@
           pkgs.meson
           pkgs.ninja
           pkgs.cmake
+          # compositor/ (Rust, Smithay)
+          pkgs.cargo
+          pkgs.rustc
+          pkgs.clippy
+          pkgs.rustfmt
+          pkgs.rust-analyzer
+          pkgs.libxkbcommon
         ];
+        # Rust links libxkbcommon by name; point the linker at nixpkgs' copy.
+        LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.libxkbcommon ];
         shellHook = ''
           # libwayland falls back to TMPDIR when XDG_RUNTIME_DIR is unset (Darwin patch),
           # but a dedicated directory keeps sockets tidy.
