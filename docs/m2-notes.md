@@ -6,7 +6,9 @@ Checked by hand with VTE terminals and GTK's widget factory: Lua config, keybind
 
 Run it: `nix run .#session` (or `COMPOSITOR=…/target/debug/compositor nix run .#session -- <client>` for a development build).
 
-Still to do in M2: animations (curves and springs from the config), shadows and blur, layer-shell (bars, launchers), trackpad gestures, groups, special workspaces, window rules, mouse binds.
+Step 3 (animations) is written and unit-tested, waiting for a check by hand.
+
+Still to do in M2: shadows and blur, layer-shell (bars, launchers), trackpad gestures, groups, special workspaces, window rules, mouse binds.
 
 ## Config: Hyprland's Lua config
 
@@ -43,3 +45,18 @@ Only `fullscreen` is advertised in `xdg_toplevel.wm_capabilities`; client fullsc
 ## Session launcher
 
 `nix run .#session` runs the compositor with what its clients need: GTK defaults (above), GSettings schemas on `XDG_DATA_DIRS`, the SVG pixbuf loader, GStreamer plugins, VTE as `$TERMINAL` and on `PATH` with the GTK demos. `COMPOSITOR=path` runs a development build.
+
+## Animations
+
+`compositor/src/anim.rs`, following Hyprland's model. An animated value has where it began, where it is and its goal; setting a new goal mid-flight starts again from where it is. Timings come from `hl.animation` leaves in Hyprland's tree (`global` → `windows` → `windowsIn`/`Out`/`Move`, `fade` → `fadeIn`/`Out`, `border`, `workspaces` → `workspacesIn`/`Out`, ...): a leaf not set inherits its parent's, `global` defaults to speed 8 on the built-in `default` bezier (0, 0.75), (0.15, 1). A bezier animation lasts `speed` × 100 ms; a spring (`hl.curve` type spring, `spring = "name"` in the leaf) runs until it settles. Bezier baking and lookup and the spring integration are ported from hyprutils (BSD-3, `compositor/tests/HYPRUTILS-LICENSE`). `animations.enabled = false` or a disabled leaf makes changes instant.
+
+What animates:
+- **Opening**: from a window's first buffer, its rectangle from the `windowsIn` style (`popin N%`, `gnomed`, `slide [edge]`) to its place, alpha 0 → 1 (`fadeIn`).
+- **Closing**: the window's last textures are kept (`render::snapshot`) and animate to the `windowsOut` style, alpha → 0 (`fadeOut`), drawn above the other windows.
+- **Layout changes** (splits, closing neighbours, swaps, float, fullscreen): `windowsMove`.
+- **Border colour** on focus change: `border`, mixed in OkLab as Hyprland does; gradients with different stop counts are resampled.
+- **Workspace switches**: the workspace left and the one entered get an offset and an alpha from `workspacesOut` / `workspacesIn` styles (`slide`, `slidevert`, `fade`, `slidefade[vert]`, `N%`, a direction), with `general.gaps_workspaces`. Going to a higher number slides left.
+
+How it's drawn: a window's content is laid out at its goal rectangle and mapped into the animated one (moved and scaled), so a window resizing under a tile is stretched for the length of the animation, as in Hyprland. The goal is the client's window geometry where the layout put it, cut to its tile: when a tile grows, the move starts once the client has committed the bigger size. Rounding, border and tile clipping follow the animated rectangle. Input and layout always use the goals. A window that wasn't on screen in the previous frame (a workspace switch) jumps to its place rather than sliding there. A floating window that resizes itself follows without animating.
+
+Not animated yet: moving a window to another workspace without following (it disappears at once), popups, layers (no layer-shell yet), `borderangle`.

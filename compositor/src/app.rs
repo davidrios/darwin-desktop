@@ -183,6 +183,9 @@ impl App {
         }
         self.state.children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
 
+        if self.state.animate(std::time::Instant::now()) {
+            self.state.needs_redraw = true;
+        }
         if self.state.needs_redraw {
             self.state.needs_redraw = false;
             self.renderer.render(&self.state);

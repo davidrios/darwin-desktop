@@ -6,6 +6,7 @@
 //!
 //! Usage: compositor [--fullscreen] [--no-capture] [--keyboard-layout ID] [--dump-keymap] [-- client args...]
 
+mod anim;
 mod app;
 mod binds;
 mod config;

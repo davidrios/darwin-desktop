@@ -3,6 +3,10 @@
 //!
 //! M1 uploads a surface's whole buffer whenever it has a new commit and
 //! redraws the whole frame; damage tracking comes later.
+//!
+//! Windows are drawn where their animations are (`anim`): a window's content
+//! is laid out at its goal rectangle and mapped into the animated one, scaled
+//! and moved, with its border, rounding and alpha following.
 
 use std::{cell::RefCell, ffi::c_void, ptr::NonNull};
 
@@ -20,14 +24,14 @@ use smithay::{
     backend::renderer::utils::{CommitCounter, RendererSurfaceStateUserData},
     desktop::PopupManager,
     reexports::wayland_server::protocol::{wl_shm, wl_surface::WlSurface},
-    utils::{Logical, Point, Rectangle},
+    utils::{Logical, Point, Rectangle, Size},
     wayland::{
         compositor::{SurfaceData, TraversalAction, with_surface_tree_downward},
         shm::with_buffer_contents,
     },
 };
 
-use crate::state::State;
+use crate::{anim, config::Gradient, config::Settings, dwindle::Rect, state::State};
 
 const SHADERS: &str = r#"
 #include <metal_stdlib>
@@ -218,43 +222,51 @@ impl Renderer {
         encoder.setRenderPipelineState(&self.pipeline);
 
         let settings = &state.config.settings;
-        let focused = state.focused_window();
-        let mut frame =
-            Frame { renderer: self, encoder: &encoder, scale, width: size.w, height: size.h, round: None };
+        let mut frame = Frame {
+            renderer: self,
+            encoder: &encoder,
+            scale,
+            width: size.w,
+            height: size.h,
+            round: None,
+            xform: Xform::IDENTITY,
+            alpha: 1.0,
+        };
+        let transition = state.wm.transition.as_ref();
+        // A workspace switch: the workspace being left, sliding or fading out.
+        if let Some(tr) = transition {
+            if let Some(ws) = state.wm.workspaces.get(&tr.from) {
+                let mut windows = ws.windows();
+                if let Some(fs) = &ws.fullscreen {
+                    windows.retain(|w| w != fs);
+                    windows.push(fs.clone());
+                }
+                for window in &windows {
+                    let fullscreen = ws.fullscreen.as_ref() == Some(window);
+                    frame.window(settings, window, *tr.out_offset.value(), *tr.out_alpha.value(), fullscreen);
+                }
+            }
+        }
+        let (offset, alpha) = transition.map(|t| (*t.in_offset.value(), *t.in_alpha.value())).unwrap_or(([0.0, 0.0], 1.0));
         for window in state.space.elements() {
-            let (Some(loc), Some(toplevel)) = (state.space.element_location(window), window.toplevel()) else {
-                continue;
-            };
-            let surface = toplevel.wl_surface();
-            let clip = crate::wm::clip_of(window);
-            // What's visible: the window, cut to its tile when it's bigger
-            // than the tile. Border and rounding follow this, not the client size.
-            let full = Rectangle::new(loc, window.geometry().size);
-            let geometry = clip.and_then(|c| full.intersection(c)).unwrap_or(full);
-            let decorated = !state.is_fullscreen(window) && geometry.size.w > 0 && geometry.size.h > 0;
-
-            // Border: a rounded ring just outside the window, in the space the
-            // layout reserved for it.
-            let b = settings.border_size.max(0);
-            if decorated && b > 0 {
-                let gradient =
-                    if focused.as_ref() == Some(window) { &settings.active_border } else { &settings.inactive_border };
-                let outer = Rectangle::new(
-                    (geometry.loc.x - b, geometry.loc.y - b).into(),
-                    (geometry.size.w + 2 * b, geometry.size.h + 2 * b).into(),
-                );
-                frame.border(outer, (settings.rounding + b) as f64, b as f64, gradient);
-            }
-
-            // Content, rounded; a tiled window only inside its tile; its popups anywhere.
-            frame.round = (decorated && settings.rounding > 0).then_some((geometry, settings.rounding as f64));
-            frame.clip(clip);
-            frame.draw_tree(surface, (loc - window.geometry().loc).to_f64());
-            frame.clip(None);
-            frame.round = None;
-            for (popup, offset) in PopupManager::popups_for_surface(surface) {
-                frame.draw_tree(popup.wl_surface(), (loc + offset - popup.geometry().loc).to_f64());
-            }
+            frame.window(settings, window, offset, alpha, state.is_fullscreen(window));
+        }
+        for closing in &state.closing {
+            frame.decorated(
+                settings,
+                *closing.rect.value(),
+                closing.anchor,
+                *closing.alpha.value(),
+                closing.decorated,
+                closing.clipped,
+                &closing.border,
+                |f| {
+                    for p in &closing.pieces {
+                        f.quad(&p.texture, p.opaque, p.pos, p.size, p.src, p.buffer);
+                    }
+                },
+                |_| {},
+            );
         }
 
         encoder.endEncoding();
@@ -351,9 +363,77 @@ struct Frame<'a> {
     scale: f64,
     width: f64,
     height: f64,
-    /// The window rectangle and corner radius (logical) the surfaces being
-    /// drawn are rounded to.
-    round: Option<(Rectangle<i32, Logical>, f64)>,
+    /// The window rectangle and corner radius (logical, on screen) the
+    /// surfaces being drawn are rounded to.
+    round: Option<(Rect, f64)>,
+    /// Where the surfaces being drawn go (a window's animation).
+    xform: Xform,
+    /// Opacity of what's drawn (a window's fade).
+    alpha: f32,
+}
+
+/// Maps a window's content from where it's laid out (around `anchor`) to
+/// where it's drawn (from `base`, scaled).
+#[derive(Clone, Copy)]
+struct Xform {
+    base: (f64, f64),
+    anchor: (f64, f64),
+    scale: (f64, f64),
+}
+
+impl Xform {
+    const IDENTITY: Xform = Xform { base: (0.0, 0.0), anchor: (0.0, 0.0), scale: (1.0, 1.0) };
+
+    fn point(&self, p: Point<f64, Logical>) -> Point<f64, Logical> {
+        (self.base.0 + (p.x - self.anchor.0) * self.scale.0, self.base.1 + (p.y - self.anchor.1) * self.scale.1).into()
+    }
+}
+
+/// A surface's last texture and where it was, kept to draw a closed window
+/// animating out.
+pub struct Piece {
+    texture: Texture,
+    opaque: bool,
+    pos: Point<f64, Logical>,
+    size: Size<f64, Logical>,
+    src: Rectangle<f64, Logical>,
+    buffer: Size<f64, Logical>,
+}
+
+/// The textures of a surface tree as last drawn, laid out from `origin`.
+pub fn snapshot(surface: &WlSurface, origin: Point<f64, Logical>) -> Vec<Piece> {
+    let mut pieces = Vec::new();
+    with_surface_tree_downward(
+        surface,
+        origin,
+        |_, states, loc| {
+            let view = states.data_map.get::<RendererSurfaceStateUserData>().and_then(|d| d.lock().unwrap().view());
+            match view {
+                Some(view) => TraversalAction::DoChildren(*loc + view.offset.to_f64()),
+                None => TraversalAction::SkipChildren,
+            }
+        },
+        |_, states, loc| {
+            let Some(data) = states.data_map.get::<RendererSurfaceStateUserData>() else { return };
+            let (view, buffer_size) = {
+                let d = data.lock().unwrap();
+                (d.view(), d.buffer_size())
+            };
+            let (Some(view), Some(buffer)) = (view, buffer_size) else { return };
+            let Some(cache) = states.data_map.get::<RefCell<Option<SurfaceTexture>>>() else { return };
+            let Some(cached) = cache.borrow().as_ref().map(|c| (c.texture.clone(), c.opaque)) else { return };
+            pieces.push(Piece {
+                texture: cached.0,
+                opaque: cached.1,
+                pos: *loc + view.offset.to_f64(),
+                size: view.dst.to_f64(),
+                src: view.src,
+                buffer: buffer.to_f64(),
+            });
+        },
+        |_, _, _| true,
+    );
+    pieces
 }
 
 impl Frame<'_> {
@@ -368,18 +448,89 @@ impl Frame<'_> {
     }
 
     /// A logical rectangle in pixels.
-    fn px(&self, r: Rectangle<i32, Logical>) -> [f32; 4] {
-        let s = self.scale as f32;
-        [r.loc.x as f32 * s, r.loc.y as f32 * s, r.size.w as f32 * s, r.size.h as f32 * s]
+    fn px(&self, r: Rect) -> [f32; 4] {
+        let s = self.scale;
+        [(r.x * s) as f32, (r.y * s) as f32, (r.w * s) as f32, (r.h * s) as f32]
+    }
+
+    /// A live window where its animation has it, offset and faded by a
+    /// workspace switch.
+    fn window(&mut self, settings: &Settings, window: &smithay::desktop::Window, offset: [f64; 2], ws_alpha: f64, fullscreen: bool) {
+        let Some(toplevel) = window.toplevel() else { return };
+        let Some((rect, goal, alpha, border)) =
+            anim::with_anim(window, |a| (*a.rect.value(), *a.rect.goal(), *a.alpha.value(), a.border.value().clone()))
+        else {
+            return;
+        };
+        let rect = Rect { x: rect.x + offset[0], y: rect.y + offset[1], ..rect };
+        let surface = toplevel.wl_surface();
+        let geo = window.geometry().loc;
+        let origin: Point<f64, Logical> = (goal.x - geo.x as f64, goal.y - geo.y as f64).into();
+        let clipped = crate::wm::clip_of(window).is_some();
+        self.decorated(
+            settings,
+            rect,
+            goal,
+            alpha * ws_alpha,
+            !fullscreen,
+            clipped,
+            &border,
+            |f| f.draw_tree(surface, origin),
+            |f| {
+                for (popup, offset) in PopupManager::popups_for_surface(surface) {
+                    let at = (goal.x + (offset.x - popup.geometry().loc.x) as f64, goal.y + (offset.y - popup.geometry().loc.y) as f64);
+                    f.draw_tree(popup.wl_surface(), at.into());
+                }
+            },
+        );
+    }
+
+    /// A window's border and content in `rect` (logical, on screen), its
+    /// content laid out for `goal`: rounded, cut to the rectangle when it's a
+    /// tile (`clipped`), its popups after, uncut.
+    #[allow(clippy::too_many_arguments)]
+    fn decorated(
+        &mut self,
+        settings: &Settings,
+        rect: Rect,
+        goal: Rect,
+        alpha: f64,
+        decorated: bool,
+        clipped: bool,
+        border: &Gradient,
+        content: impl FnOnce(&mut Self),
+        popups: impl FnOnce(&mut Self),
+    ) {
+        if alpha <= 0.001 || rect.w <= 0.0 || rect.h <= 0.0 || goal.w <= 0.0 || goal.h <= 0.0 {
+            return;
+        }
+        self.alpha = alpha.min(1.0) as f32;
+        // Border: a rounded ring just outside the window, in the space the
+        // layout reserved for it.
+        let b = settings.border_size.max(0) as f64;
+        if decorated && b > 0.0 {
+            let outer = Rect { x: rect.x - b, y: rect.y - b, w: rect.w + 2.0 * b, h: rect.h + 2.0 * b };
+            self.border(outer, settings.rounding as f64 + b, b, border);
+        }
+        self.xform = Xform { base: (rect.x, rect.y), anchor: (goal.x, goal.y), scale: (rect.w / goal.w, rect.h / goal.h) };
+        self.round = (decorated && settings.rounding > 0).then_some((rect, settings.rounding as f64));
+        self.clip(clipped.then_some(rect));
+        content(self);
+        self.clip(None);
+        self.round = None;
+        popups(self);
+        self.xform = Xform::IDENTITY;
+        self.alpha = 1.0;
     }
 
     /// A rounded border ring filling `outer` (logical), `width` thick.
-    fn border(&mut self, outer: Rectangle<i32, Logical>, radius: f64, width: f64, gradient: &crate::config::Gradient) {
+    fn border(&mut self, outer: Rect, radius: f64, width: f64, gradient: &Gradient) {
         let mut quad = Quad::empty();
         let r = self.px(outer);
         quad.dst = self.ndc(r[0] as f64, r[1] as f64, r[2] as f64, r[3] as f64);
         quad.rect = r;
-        quad.radius = (radius * self.scale) as f32;
+        quad.radius = (radius.min(outer.w / 2.0).min(outer.h / 2.0) * self.scale) as f32;
+        quad.alpha = self.alpha;
         quad.border = (width * self.scale) as f32;
         quad.angle = gradient.angle.to_radians();
         quad.ncolors = gradient.colors.len().clamp(1, 8) as u32;
@@ -399,16 +550,14 @@ impl Frame<'_> {
     }
 
     /// Restrict drawing to a logical rectangle, or lift the restriction.
-    fn clip(&mut self, rect: Option<smithay::utils::Rectangle<i32, Logical>>) {
+    fn clip(&mut self, rect: Option<Rect>) {
         let (w, h) = (self.width as usize, self.height as usize);
         let scissor = match rect {
             None => MTLScissorRect { x: 0, y: 0, width: w, height: h },
             Some(r) => {
                 // Logical to pixels, clamped to the drawable (Metal requires it).
-                let x0 = ((r.loc.x as f64 * self.scale).round().max(0.0) as usize).min(w);
-                let y0 = ((r.loc.y as f64 * self.scale).round().max(0.0) as usize).min(h);
-                let x1 = (((r.loc.x + r.size.w) as f64 * self.scale).round().max(0.0) as usize).min(w);
-                let y1 = (((r.loc.y + r.size.h) as f64 * self.scale).round().max(0.0) as usize).min(h);
+                let px = |v: f64, max: usize| ((v * self.scale).round().max(0.0) as usize).min(max);
+                let (x0, y0, x1, y1) = (px(r.x, w), px(r.y, h), px(r.x + r.w, w), px(r.y + r.h, h));
                 MTLScissorRect { x: x0, y: y0, width: x1.saturating_sub(x0), height: y1.saturating_sub(y0) }
             }
         };
@@ -455,8 +604,9 @@ impl Frame<'_> {
         if size.w <= 0.0 || size.h <= 0.0 || buffer.w <= 0.0 || buffer.h <= 0.0 {
             return;
         }
+        let pos = self.xform.point(pos);
         let (x, y) = (pos.x * self.scale, pos.y * self.scale);
-        let (w, h) = (size.w * self.scale, size.h * self.scale);
+        let (w, h) = (size.w * self.xform.scale.0 * self.scale, size.h * self.xform.scale.1 * self.scale);
         let mut quad = Quad::empty();
         quad.dst = self.ndc(x, y, w, h);
         quad.src = [
@@ -466,9 +616,10 @@ impl Frame<'_> {
             (src.size.h / buffer.h) as f32,
         ];
         quad.opaque = opaque as u32;
+        quad.alpha = self.alpha;
         if let Some((rect, radius)) = self.round {
             quad.rect = self.px(rect);
-            quad.radius = (radius * self.scale) as f32;
+            quad.radius = (radius.min(rect.w / 2.0).min(rect.h / 2.0) * self.scale) as f32;
         }
         let bytes = NonNull::from(&quad).cast::<c_void>();
         let len = std::mem::size_of::<Quad>();

@@ -150,8 +150,7 @@ pub struct DwindleConfig {
     pub use_active_for_splits: bool,
 }
 
-/// An `hl.curve` (used by the animations, next).
-#[allow(dead_code)]
+/// An `hl.curve`.
 #[derive(Clone, Debug)]
 pub enum Curve {
     Bezier([(f64, f64); 2]),
@@ -159,18 +158,16 @@ pub enum Curve {
 }
 
 /// An `hl.animation` leaf.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct AnimationConfig {
     pub enabled: bool,
     pub speed: f64,
+    /// A bezier's name, or `spring:` and a spring's name (as Hyprland).
     pub curve: Option<String>,
     pub style: Option<String>,
 }
 
-/// The settings the compositor uses, with Hyprland's defaults. (Rounding and
-/// the animation settings are read by the renderer, next.)
-#[allow(dead_code)]
+/// The settings the compositor uses, with Hyprland's defaults.
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub gaps_in: Gaps,
@@ -180,6 +177,8 @@ pub struct Settings {
     pub inactive_border: Gradient,
     pub rounding: i32,
     pub layout: String,
+    /// `general.gaps_workspaces`: space between workspaces as they slide.
+    pub workspace_gap: f64,
     pub dwindle: DwindleConfig,
     /// 0: click to focus, 1+: keyboard focus follows the pointer.
     pub follow_mouse: i64,
@@ -189,7 +188,7 @@ pub struct Settings {
 }
 
 impl Settings {
-    fn from_flat(flat: &BTreeMap<String, ConfigValue>) -> Settings {
+    pub(crate) fn from_flat(flat: &BTreeMap<String, ConfigValue>) -> Settings {
         let num = |k: &str, d: f64| flat.get(k).and_then(ConfigValue::as_f64).unwrap_or(d);
         let gaps = |k: &str, d: f64| flat.get(k).and_then(Gaps::parse).unwrap_or(Gaps::all(d));
         let string = |k: &str, d: &str| match flat.get(k) {
@@ -207,6 +206,7 @@ impl Settings {
                 .unwrap_or(Gradient::solid([0.267, 0.267, 0.267, 1.0])),
             rounding: num("decoration.rounding", 0.0) as i32,
             layout: string("general.layout", "dwindle"),
+            workspace_gap: num("general.gaps_workspaces", 0.0),
             dwindle: DwindleConfig {
                 preserve_split: num("dwindle.preserve_split", 0.0) != 0.0,
                 force_split: num("dwindle.force_split", 0.0) as i64,
@@ -563,9 +563,10 @@ fn install_api(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                 let kind: String = t.get::<Option<String>>("type")?.unwrap_or_else(|| "bezier".into());
                 let curve = if kind == "spring" {
                     Curve::Spring {
+                        // hyprutils' defaults; "dampening" is Hyprland's old spelling.
                         mass: t.get::<Option<f64>>("mass")?.unwrap_or(1.0),
-                        stiffness: t.get::<Option<f64>>("stiffness")?.unwrap_or(100.0),
-                        damping: t.get::<Option<f64>>("damping")?.or(t.get::<Option<f64>>("dampening")?).unwrap_or(10.0),
+                        stiffness: t.get::<Option<f64>>("stiffness")?.unwrap_or(250.0),
+                        damping: t.get::<Option<f64>>("damping")?.or(t.get::<Option<f64>>("dampening")?).unwrap_or(25.0),
                     }
                 } else {
                     let pts: Vec<Vec<f64>> = t.get("points")?;
@@ -588,7 +589,7 @@ fn install_api(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                 let anim = AnimationConfig {
                     enabled: t.get::<Option<bool>>("enabled")?.unwrap_or(true),
                     speed: t.get::<Option<f64>>("speed")?.unwrap_or(10.0),
-                    curve: opt_str(&t, "bezier")?.or(opt_str(&t, "spring")?),
+                    curve: opt_str(&t, "bezier")?.or(opt_str(&t, "spring")?.map(|s| format!("spring:{s}"))),
                     style: opt_str(&t, "style")?,
                 };
                 shared.borrow_mut().animations.insert(leaf, anim);

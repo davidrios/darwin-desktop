@@ -83,6 +83,12 @@ pub struct State {
     pub pointer_location: Point<f64, Logical>,
     /// Something changed on screen since the last frame.
     pub needs_redraw: bool,
+    /// Every animation leaf's timing, from the config.
+    pub timings: crate::anim::Timings,
+    /// Windows animating out.
+    pub closing: Vec<crate::anim::Closing>,
+    /// Counts `animate` calls.
+    pub anim_frame: u64,
     pub children: Vec<Child>,
 }
 
@@ -132,6 +138,7 @@ impl State {
             .expect("display source");
 
         State {
+            timings: crate::anim::Timings::new(&config.settings),
             config,
             wm: Wm::default(),
             quit_requested: false,
@@ -154,6 +161,8 @@ impl State {
             cursor_status: CursorImageStatus::Named(CursorIcon::Default),
             pointer_location: (0.0, 0.0).into(),
             needs_redraw: true,
+            closing: Vec::new(),
+            anim_frame: 0,
             children: Vec::new(),
         }
     }

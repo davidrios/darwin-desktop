@@ -81,13 +81,15 @@ pub struct Wm {
     previous: i32,
     /// Toplevels created but not yet committed (no size decided yet).
     pub pending: Vec<Window>,
+    /// A workspace switch animating.
+    pub transition: Option<crate::anim::Transition>,
 }
 
 impl Default for Wm {
     fn default() -> Self {
         let mut workspaces = BTreeMap::new();
         workspaces.insert(1, Workspace::default());
-        Wm { workspaces, active: 1, previous: 1, pending: Vec::new() }
+        Wm { workspaces, active: 1, previous: 1, pending: Vec::new(), transition: None }
     }
 }
 
@@ -173,6 +175,7 @@ impl State {
     pub fn manage(&mut self, window: Window) {
         self.wm.pending.retain(|w| *w != window);
         let Some(toplevel) = window.toplevel() else { return };
+        crate::anim::mark_fresh(&window);
         let fixed_size = {
             let (min, max) = smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
                 let mut cached = states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
@@ -252,6 +255,9 @@ impl State {
     pub fn unmanage(&mut self, window: &Window) {
         self.wm.pending.retain(|w| w != window);
         let was_active = self.workspace_of(window) == Some(self.wm.active);
+        if was_active {
+            self.animate_close(window);
+        }
         for ws in self.wm.workspaces.values_mut() {
             ws.forget(window);
         }
@@ -353,9 +359,12 @@ impl State {
         if self.active_ws_ref().is_empty() {
             self.wm.workspaces.remove(&self.wm.active);
         }
+        let from = self.wm.active;
         self.wm.active = id;
         self.wm.workspaces.entry(id).or_default();
         self.relayout();
+        self.closing.clear();
+        self.animate_workspace_switch(from);
         let next = self.active_ws_ref().last_focused();
         self.focus(next, SERIAL_COUNTER.next_serial());
         tracing::debug!("workspace {id}");
