@@ -19,11 +19,32 @@ final: prev: {
     libepoxy = import ./pkgs/libepoxy.nix { inherit (prev) libepoxy libglvnd; };
     gtk4 = self.callPackage ./pkgs/gtk4.nix { inherit (prev) gtk4; };
     gtk4-demos = self.callPackage ./pkgs/gtk4-demos.nix { };
+    # GTK 3, for waybar.
+    gtk3 = self.callPackage ./pkgs/gtk3.nix { inherit (prev) gtk3; };
+    gtkmm3 = prev.gtkmm3.override { inherit (self) gtk3 libepoxy; };
+    # The layer-shell protocol for GTK 3 apps (waybar), with its demo app.
+    gtk-layer-shell =
+      (prev.gtk-layer-shell.override { inherit (self) gtk3 wayland; }).overrideAttrs
+        (old: {
+          mesonFlags = [
+            "-Ddocs=false"
+            "-Dexamples=true"
+          ];
+          outputs = [
+            "out"
+            "dev"
+          ];
+          outputBin = "dev";
+          meta = old.meta // {
+            platforms = old.meta.platforms ++ [ "aarch64-darwin" ];
+          };
+        });
 
     compositor = self.callPackage ./pkgs/compositor.nix { };
     session = self.callPackage ./pkgs/session.nix { };
 
     # Wayland clients for the session.
+    waybar = self.callPackage ./pkgs/waybar.nix { inherit (prev) waybar; };
     # VTE (GNOME's terminal widget) on our Wayland GTK 4, with its sample terminal app.
     vte =
       (prev.vte.override {

@@ -70,7 +70,12 @@ impl Workspace {
         }
     }
 
-    fn last_focused(&self) -> Option<Window> {
+    /// 0 for the most recently focused window, then 1, ... (-1: never).
+    pub fn focus_history_id(&self, w: &Window) -> i32 {
+        self.history.iter().rev().position(|h| h == w).map(|p| p as i32).unwrap_or(-1)
+    }
+
+    pub fn last_focused(&self) -> Option<Window> {
         self.history.iter().rev().find(|w| self.contains(w)).cloned().or_else(|| self.windows().into_iter().next())
     }
 }
@@ -148,11 +153,12 @@ impl State {
         self.find_window(&surface)
     }
 
-    /// The output minus `gaps_out`.
+    /// The output minus what layer surfaces reserve (a bar) and `gaps_out`.
     fn work_area(&self) -> Rect {
         let g = self.config.settings.gaps_out;
-        let (w, h) = (self.output_size.w as f64, self.output_size.h as f64);
-        Rect::new(g.left, g.top, w - g.left - g.right, h - g.top - g.bottom)
+        let zone = smithay::desktop::layer_map_for_output(&self.output).non_exclusive_zone();
+        let (x, y, w, h) = (zone.loc.x as f64, zone.loc.y as f64, zone.size.w as f64, zone.size.h as f64);
+        Rect::new(x + g.left, y + g.top, w - g.left - g.right, h - g.top - g.bottom)
     }
 
     /// A tile's window rectangle: inner gaps and the border taken off.
@@ -339,6 +345,11 @@ impl State {
             }
         }
         let surface = window.and_then(|w| w.wl_surface().map(|s| s.into_owned()));
+        // A launcher (an exclusive layer surface) keeps the keyboard.
+        if self.keyboard_locked_to_layer() {
+            self.needs_redraw = true;
+            return;
+        }
         if let Some(keyboard) = self.seat.get_keyboard() {
             if keyboard.current_focus() != surface {
                 keyboard.set_focus(self, surface, serial);

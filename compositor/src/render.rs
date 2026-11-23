@@ -232,6 +232,8 @@ impl Renderer {
             xform: Xform::IDENTITY,
             alpha: 1.0,
         };
+        use smithay::wayland::shell::wlr_layer::Layer;
+        frame.layers(state, &[Layer::Background, Layer::Bottom]);
         let transition = state.wm.transition.as_ref();
         // A workspace switch: the workspace being left, sliding or fading out.
         if let Some(tr) = transition {
@@ -268,6 +270,7 @@ impl Renderer {
                 |_| {},
             );
         }
+        frame.layers(state, state.upper_layers());
 
         encoder.endEncoding();
         commands.presentDrawable(ProtocolObject::from_ref(&*drawable));
@@ -451,6 +454,18 @@ impl Frame<'_> {
     fn px(&self, r: Rect) -> [f32; 4] {
         let s = self.scale;
         [(r.x * s) as f32, (r.y * s) as f32, (r.w * s) as f32, (r.h * s) as f32]
+    }
+
+    /// Layer surfaces and their popups, bottom to top.
+    fn layers(&mut self, state: &State, layers: &[smithay::wayland::shell::wlr_layer::Layer]) {
+        for (layer, origin) in state.layers_on(layers) {
+            let origin = origin.to_f64();
+            let surface = layer.wl_surface();
+            self.draw_tree(surface, origin);
+            for (popup, offset) in PopupManager::popups_for_surface(surface) {
+                self.draw_tree(popup.wl_surface(), origin + (offset - popup.geometry().loc).to_f64());
+            }
+        }
     }
 
     /// A live window where its animation has it, offset and faded by a

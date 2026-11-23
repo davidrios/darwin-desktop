@@ -69,6 +69,7 @@ pub struct State {
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    pub layer_shell_state: smithay::wayland::shell::wlr_layer::WlrLayerShellState,
     pub shm_state: ShmState,
     /// Kept alive: owns the xdg-output global.
     pub _output_manager_state: OutputManagerState,
@@ -89,6 +90,8 @@ pub struct State {
     pub closing: Vec<crate::anim::Closing>,
     /// Counts `animate` calls.
     pub anim_frame: u64,
+    /// Hyprland-compatible IPC sockets.
+    pub ipc: crate::ipc::Ipc,
     pub children: Vec<Child>,
 }
 
@@ -104,6 +107,7 @@ impl State {
             [smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::WmCapabilities::Fullscreen],
         );
         let shm_state = ShmState::new::<State>(&dh, vec![]);
+        let layer_shell_state = smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<State>(&dh);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&dh);
         let data_device_state = DataDeviceState::new::<State>(&dh);
         let cursor_shape_state = CursorShapeManagerState::new::<State>(&dh);
@@ -152,6 +156,7 @@ impl State {
             output_scale: 1.0,
             compositor_state,
             xdg_shell_state,
+            layer_shell_state,
             shm_state,
             _output_manager_state: output_manager_state,
             seat_state,
@@ -163,6 +168,7 @@ impl State {
             needs_redraw: true,
             closing: Vec::new(),
             anim_frame: 0,
+            ipc: crate::ipc::Ipc::new(loop_handle),
             children: Vec::new(),
         }
     }
@@ -180,15 +186,32 @@ impl State {
         );
         self.output.set_preferred(mode);
         self.space.map_output(&self.output, (0, 0));
+        smithay::desktop::layer_map_for_output(&self.output).arrange();
         self.relayout();
     }
 
+    /// The surface under a point, in drawing order: overlay and top layer
+    /// surfaces, windows, then bottom and background ones.
     pub fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
-        self.space.element_under(pos).and_then(|(window, location)| {
-            window
-                .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-                .map(|(s, p)| (s, (p + location).to_f64()))
-        })
+        use smithay::wayland::shell::wlr_layer::Layer;
+        let layer = |layers: &[Layer]| self.layer_surface_under(layers, pos).map(|(_, s, p)| (s, p));
+        layer(self.upper_layers())
+            .or_else(|| {
+                self.space.element_under(pos).and_then(|(window, location)| {
+                    window
+                        .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                        .map(|(s, p)| (s, (p + location).to_f64()))
+                })
+            })
+            .or_else(|| layer(&[Layer::Bottom, Layer::Background]))
+    }
+
+    /// The window under a point, unless a top or overlay layer surface covers it.
+    pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<Window> {
+        if self.layer_surface_under(self.upper_layers(), pos).is_some() {
+            return None;
+        }
+        self.space.element_under(pos).map(|(w, _)| w.clone())
     }
 
     fn unconstrain_popup(&self, popup: &PopupSurface) {
@@ -229,6 +252,10 @@ impl CompositorHandler for State {
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
         self.needs_redraw = true;
+        if self.layer_commit(surface) {
+            self.popups.commit(surface);
+            return;
+        }
 
         if !is_sync_subsurface(surface) {
             let mut root = surface.clone();
@@ -348,7 +375,10 @@ impl XdgShellHandler for State {
         let Some(seat) = Seat::<State>::from_resource(&seat) else { return };
         let kind = PopupKind::Xdg(surface);
         let Ok(root) = find_popup_root_surface(&kind) else { return };
-        if self.find_window(&root).is_none() {
+        let is_layer = smithay::desktop::layer_map_for_output(&self.output)
+            .layer_for_surface(&root, WindowSurfaceType::TOPLEVEL)
+            .is_some();
+        if self.find_window(&root).is_none() && !is_layer {
             return;
         }
         let Ok(mut grab) = self.popups.grab_popup(root, kind, &seat, serial) else { return };

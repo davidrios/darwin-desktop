@@ -363,6 +363,14 @@ impl Config {
         self.take_queue()
     }
 
+    /// Evaluates `hl.dispatch(<expr>)` in the config's Lua (IPC's Lua
+    /// dispatch, e.g. `hl.dsp.focus({ workspace = "2" })`).
+    pub fn eval_dispatch(&self, expr: &str) -> Result<Vec<Action>, String> {
+        self.take_queue();
+        self.lua.load(format!("hl.dispatch({expr})")).set_name("dispatch").exec().map_err(|e| e.to_string())?;
+        Ok(self.take_queue())
+    }
+
     /// Actions queued while the config ran (top-level `hl.exec_cmd`).
     pub fn take_queue(&self) -> Vec<Action> {
         std::mem::take(&mut self.shared.borrow_mut().queue)

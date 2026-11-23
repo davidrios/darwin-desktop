@@ -11,6 +11,8 @@ There are two ways a queue gets applied:
 | `wayland/` | libwayland 1.26.0 release tarball | Nix, `nix/pkgs/wayland.nix` |
 | `libepoxy/` | libepoxy 1.5.10 (nixpkgs) | Nix, `nix/pkgs/libepoxy.nix` |
 | `gtk4/` | GTK 4.24.0 (nixpkgs) | Nix, `nix/pkgs/gtk4.nix` |
+| `gtk3/` | GTK 3.24.52 (nixpkgs) | Nix, `nix/pkgs/gtk3.nix` |
+| `waybar/` | Waybar 0.16.0 (nixpkgs) | Nix, `nix/pkgs/waybar.nix` |
 | `vte/` | VTE 0.84.1 (nixpkgs) | Nix, `nix/overlay.nix` |
 
 ## Submodule queues: `scripts/prepare-third-party.sh`
@@ -77,6 +79,21 @@ The C libraries come from nixpkgs and are patched in their derivation's `patches
 | `003-mac-bindings-by-backend` | Mac-style key bindings (Meta+C/Z/A…, Ctrl+click as secondary click) only with the macOS backend, so apps use Linux bindings (`decisions.md`, 2026-11-20). 31 blocks in 13 files | Upstream ties these to the backend |
 
 The nix package also removes upstream's "no Wayland on Darwin" line from GTK's `meson.build` (`nix/pkgs/gtk4.nix`, a one-line substitution rather than a patch).
+
+## gtk3
+
+| Patch | What / why | Drop when |
+|---|---|---|
+| `001-no-gdesktopappinfo-on-darwin` | Guard the unused `<gio/gdesktopappinfo.h>` include in the Wayland launch context; GLib on Darwin has none (`docs/waybar-notes.md`) | GLib on Darwin provides desktop app info |
+
+The nix package also removes the "no Wayland on Darwin" line from `meson.build`, and compiles with `-DWL_EGL_PLATFORM` so `EGLNativeDisplayType` is a `wl_display *` rather than Apple's `int` (`nix/pkgs/gtk3.nix`).
+
+## waybar
+
+| Patch | What / why | Drop when |
+|---|---|---|
+| `001-darwin` | Build on Darwin: `include/util/darwin_compat.hpp` (`pipe2` from `pipe` + `fcntl`, `SOCK_CLOEXEC` and `MSG_NOSIGNAL` as 0); a variable for `WEXITSTATUS` (Darwin's macro takes its argument's address); build the `cffi` module, which the factory always refers to | Waybar builds on Darwin upstream |
+| `002-desktop-app-info` | A Darwin stand-in for `Gio::DesktopAppInfo` (reads `Name`/`Icon`/`StartupWMClass` with `Glib::KeyFile`, no fuzzy search), which the icon loader for the taskbar and Hyprland workspace icons is built on (`docs/waybar-notes.md`) | GLib on Darwin provides desktop app info |
 
 ## vte
 

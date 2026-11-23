@@ -8,7 +8,9 @@ Run it: `nix run .#session` (or `COMPOSITOR=…/target/debug/compositor nix run 
 
 Step 3 (animations) is written and unit-tested, waiting for a check by hand.
 
-Still to do in M2: shadows and blur, layer-shell (bars, launchers), trackpad gestures, groups, special workspaces, window rules, mouse binds.
+Layer-shell (bars, launchers), waybar (`docs/waybar-notes.md`) and a Hyprland IPC subset for its modules are written, waiting for a check by hand.
+
+Still to do in M2: shadows and blur, trackpad gestures, groups, special workspaces, window rules, mouse binds.
 
 ## Config: Hyprland's Lua config
 
@@ -60,3 +62,25 @@ What animates:
 How it's drawn: a window's content is laid out at its goal rectangle and mapped into the animated one (moved and scaled), so a window resizing under a tile is stretched for the length of the animation, as in Hyprland. The goal is the client's window geometry where the layout put it, cut to its tile: when a tile grows, the move starts once the client has committed the bigger size. Rounding, border and tile clipping follow the animated rectangle. Input and layout always use the goals. A window that wasn't on screen in the previous frame (a workspace switch) jumps to its place rather than sliding there. A floating window that resizes itself follows without animating.
 
 Not animated yet: moving a window to another workspace without following (it disappears at once), popups, layers (no layer-shell yet), `borderangle`.
+
+## Layer shell
+
+`compositor/src/layers.rs`: `zwlr_layer_shell_v1` through Smithay's `LayerMap` for our one output (a requested `wl_output` is always ours). The map places surfaces by anchor, margin and size and keeps the zone exclusive surfaces leave; tiling's work area is that zone minus `gaps_out`, so a bar pushes the tiles over (animated, `windowsMove`). Layers are arranged again when the output size changes.
+
+Drawing and hit-testing go background, bottom, the workspace (with its transitions and closing windows), top, overlay. A fullscreen window covers the top layer (a bar) but not the overlay, as in Hyprland. Follow-mouse and click-to-focus don't reach a window under a top or overlay surface.
+
+Keyboard: a top or overlay surface with `exclusive` interactivity (a launcher) takes the keyboard while it's mapped and windows can't take it back; `on_demand` surfaces get it when clicked. When a layer surface with the keyboard goes away or stops wanting it, focus returns to the workspace's last focused window. Layer surfaces' popups (menus, tooltips) are tracked, kept on the output and can grab.
+
+Not yet: layer animations (`layersIn`/`Out`, `fadeLayers*`), `hl.layer_rule`, Hyprland's `ignorezero`/blur for layers.
+
+## Hyprland IPC
+
+`compositor/src/ipc.rs`, enough for waybar's `hyprland/*` modules and simple `hyprctl`-style scripts. The compositor exports `HYPRLAND_INSTANCE_SIGNATURE` (`dd_<pid>`: short, because macOS caps unix socket paths at 103 bytes and `$TMPDIR` is long) and serves `$XDG_RUNTIME_DIR/hypr/<signature>/.socket.sock` and `.socket2.sock`; the directory is removed on exit.
+
+Requests (`[flags]/command`, all answered in JSON): `monitors`, `workspaces`, `activeworkspace`, `clients`, `activewindow`, `workspacerules` (empty), `devices` (one keyboard, the active xkb layout), `version`, `systeminfo` (reports `configProvider: lua`, so waybar sends Lua dispatches). `dispatch` takes a Lua expression (`hl.dsp.focus({ workspace = "2" })`, run through the config's own `hl.dispatch`) or the legacy `workspace`, `movetoworkspace[silent]`, `exec`, `killactive`, `togglefloating`, `fullscreen`, `togglesplit`, `exit`.
+
+Events: each frame a snapshot of the workspaces (the active one and any with windows), windows (workspace, app id, title), focus, fullscreen and keyboard layout is compared with the last one, and the differences go out as `createworkspace[v2]`, `workspace[v2]`, `openwindow`, `movewindow[v2]`, `windowtitle[v2]`, `closewindow`, `activewindow[v2]`, `fullscreen`, `activelayout`, `destroyworkspace[v2]`. Window addresses are per-window counters. The one monitor is `darwin-0`, the `wl_output` name waybar matches against.
+
+The session (`nix run .#session`) puts waybar and `gtk-layer-demo` on `PATH` and ships a waybar config of modules that work here (workspaces, window title, language, disk, load, clock); `~/.config/waybar` wins.
+
+Not yet: special workspaces, monitor events (one output), `hyprctl` itself (not built), `keyword`/`reload`/`binds`/`layers` requests.

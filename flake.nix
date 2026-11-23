@@ -29,6 +29,9 @@
           libepoxy
           gtk4
           gtk4-demos
+          gtk3
+          gtk-layer-shell
+          waybar
           compositor
           vte
           session

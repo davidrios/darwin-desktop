@@ -192,11 +192,20 @@ impl App {
         }
 
         self.apply_cursor();
+        self.state.ipc_tick();
 
         let now = self.state.start_time.elapsed();
         let output = self.state.output.clone();
         for window in self.state.space.elements() {
             window.send_frame(&output, now, Some(Duration::ZERO), |_, _| Some(output.clone()));
+        }
+        for (layer, _) in self.state.layers_on(&[
+            smithay::wayland::shell::wlr_layer::Layer::Background,
+            smithay::wayland::shell::wlr_layer::Layer::Bottom,
+            smithay::wayland::shell::wlr_layer::Layer::Top,
+            smithay::wayland::shell::wlr_layer::Layer::Overlay,
+        ]) {
+            layer.send_frame(&output, now, Some(Duration::ZERO), |_, _| Some(output.clone()));
         }
         // Animated cursors wait for frame callbacks too.
         if let smithay::input::pointer::CursorImageStatus::Surface(surface) = &self.state.cursor_status {
@@ -206,6 +215,7 @@ impl App {
         }
         self.state.space.refresh();
         self.state.popups.cleanup();
+        smithay::desktop::layer_map_for_output(&output).cleanup();
         self.flush();
         true
     }

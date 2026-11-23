@@ -1,0 +1,146 @@
+GLib on Darwin has no GDesktopAppInfo, so giomm has no Gio::DesktopAppInfo,
+which the icon loader (taskbar, Hyprland workspace icons) is built on. Adds
+include/util/desktop_app_info.hpp: the real headers elsewhere; on Darwin a
+stand-in class reading Name, Icon and StartupWMClass from the desktop entry with
+Glib::KeyFile, and a g_desktop_app_info_search() that finds nothing (icons are
+found by exact desktop file name only).
+
+diff --git a/include/modules/wlr/taskbar.hpp b/include/modules/wlr/taskbar.hpp
+index 3dcbb03..4d27756 100644
+--- a/include/modules/wlr/taskbar.hpp
++++ b/include/modules/wlr/taskbar.hpp
+@@ -20,7 +20,7 @@
+ #include "bar.hpp"
+ #include "client.hpp"
+ #include "ext-workspace-v1-client-protocol.h"
+-#include "giomm/desktopappinfo.h"
++#include "util/desktop_app_info.hpp"
+ #include "util/icon_loader.hpp"
+ #include "util/json.hpp"
+ #include "wlr-foreign-toplevel-management-unstable-v1-client-protocol.h"
+diff --git a/include/util/desktop_app_info.hpp b/include/util/desktop_app_info.hpp
+new file mode 100644
+index 0000000..8b4a7e0
+--- /dev/null
++++ b/include/util/desktop_app_info.hpp
+@@ -0,0 +1,92 @@
++#pragma once
++
++// Gio::DesktopAppInfo, or on Darwin a stand-in with the part Waybar uses.
++//
++// GLib on Darwin has no GDesktopAppInfo (it uses GOsxAppInfo), so giomm has no
++// Gio::DesktopAppInfo either. The stand-in reads a desktop entry with
++// Glib::KeyFile: Name, Icon and StartupWMClass. g_desktop_app_info_search()
++// (GLib's fuzzy search of every installed entry) finds nothing, so icons are
++// found by exact desktop file name only.
++
++#ifndef __APPLE__
++#include <gio/gdesktopappinfo.h>
++#include <giomm/desktopappinfo.h>
++#else
++#include <giomm.h>
++#include <glibmm.h>
++
++#include <cstdlib>
++#include <string>
++#include <vector>
++
++namespace Gio {
++
++class DesktopAppInfo {
++ public:
++  static Glib::RefPtr<DesktopAppInfo> create_from_filename(const std::string& path) {
++    if (!Glib::file_test(path, Glib::FILE_TEST_IS_REGULAR)) return {};
++    try {
++      Glib::KeyFile file;
++      file.load_from_file(path);
++      if (!file.has_group(kGroup)) return {};
++      auto* info = new DesktopAppInfo();
++      info->name_ = get(file, "Name", true);
++      info->icon_ = get(file, "Icon", false);
++      info->startup_wm_class_ = get(file, "StartupWMClass", false);
++      return Glib::RefPtr<DesktopAppInfo>(info);
++    } catch (const Glib::Error&) {
++      return {};
++    }
++  }
++
++  // A desktop file id ("org.gnome.Foo.desktop"), looked up in the XDG data dirs.
++  static Glib::RefPtr<DesktopAppInfo> create(const std::string& desktop_id) {
++    std::vector<std::string> dirs = {Glib::get_user_data_dir()};
++    for (const auto& d : Glib::get_system_data_dirs()) dirs.push_back(d);
++    for (const auto& d : dirs) {
++      if (auto info = create_from_filename(d + "/applications/" + desktop_id)) return info;
++    }
++    return {};
++  }
++
++  std::string get_name() const { return name_; }
++  std::string get_display_name() const { return name_; }
++  std::string get_startup_wm_class() const { return startup_wm_class_; }
++
++  Glib::RefPtr<Gio::Icon> get_icon() const {
++    if (icon_.empty()) return {};
++    try {
++      return Gio::Icon::create(icon_);
++    } catch (const Glib::Error&) {
++      return {};
++    }
++  }
++
++  // For Glib::RefPtr.
++  void reference() const { ++refs_; }
++  void unreference() const {
++    if (--refs_ == 0) delete this;
++  }
++
++ private:
++  static constexpr const char* kGroup = "Desktop Entry";
++
++  static std::string get(const Glib::KeyFile& file, const char* key, bool localized) {
++    try {
++      if (!file.has_key(kGroup, key)) return "";
++      return localized ? file.get_locale_string(kGroup, key) : file.get_string(kGroup, key);
++    } catch (const Glib::Error&) {
++      return "";
++    }
++  }
++
++  DesktopAppInfo() = default;
++  std::string name_, icon_, startup_wm_class_;
++  mutable int refs_ = 1;
++};
++
++}  // namespace Gio
++
++// GLib's search of all installed desktop entries: none on Darwin.
++static inline gchar*** g_desktop_app_info_search(const gchar*) { return nullptr; }
++#endif
+diff --git a/include/util/icon_loader.hpp b/include/util/icon_loader.hpp
+index 0df2db6..2d9658f 100644
+--- a/include/util/icon_loader.hpp
++++ b/include/util/icon_loader.hpp
+@@ -1,8 +1,7 @@
+ #pragma once
+ 
+ #include <gdkmm/general.h>
+-#include <gio/gdesktopappinfo.h>
+-#include <giomm/desktopappinfo.h>
++#include "util/desktop_app_info.hpp"
+ #include <glibmm/fileutils.h>
+ #include <gtkmm/image.h>
+ #include <spdlog/spdlog.h>
+diff --git a/src/modules/wlr/taskbar.cpp b/src/modules/wlr/taskbar.cpp
+index 54bf852..74f65dd 100644
+--- a/src/modules/wlr/taskbar.cpp
++++ b/src/modules/wlr/taskbar.cpp
+@@ -2,8 +2,7 @@
+ 
+ #include <fmt/core.h>
+ #include <gdkmm/monitor.h>
+-#include <gio/gdesktopappinfo.h>
+-#include <giomm/desktopappinfo.h>
++#include "util/desktop_app_info.hpp"
+ #include <gtkmm/icontheme.h>
+ #include <spdlog/spdlog.h>
+ 

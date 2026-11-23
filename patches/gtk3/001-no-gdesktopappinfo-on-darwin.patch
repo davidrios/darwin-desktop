@@ -1,0 +1,17 @@
+GLib on Darwin installs no <gio/gdesktopappinfo.h> (it has GOsxAppInfo
+instead). GTK 3's Wayland launch context includes it but uses nothing from it:
+guard the include. Same fix as patches/gtk4/001.
+
+--- a/gdk/wayland/gdkapplaunchcontext-wayland.c	2026-11-22 03:40:26
++++ b/gdk/wayland/gdkapplaunchcontext-wayland.c	2026-11-22 03:40:26
+@@ -21,7 +21,10 @@
+ #include <unistd.h>
+ 
+ #include <glib.h>
++#ifndef __APPLE__
++/* GLib on Darwin has no GDesktopAppInfo (it uses GOsxAppInfo); nothing here uses it. */
+ #include <gio/gdesktopappinfo.h>
++#endif
+ 
+ #include "gdkwayland.h"
+ #include "gdkprivate-wayland.h"

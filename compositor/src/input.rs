@@ -142,7 +142,7 @@ pub fn pointer_motion(state: &mut State, location: Point<f64, Logical>, time: In
     let Some(pointer) = state.seat.get_pointer() else { return };
     // follow_mouse: keyboard focus goes to the window under the pointer.
     if state.config.settings.follow_mouse >= 1 && !pointer.is_grabbed() {
-        if let Some(window) = state.space.element_under(location).map(|(w, _)| w.clone()) {
+        if let Some(window) = state.window_under(location) {
             if state.focused_window().as_ref() != Some(&window) {
                 state.focus(Some(window), SERIAL_COUNTER.next_serial());
             }
@@ -157,9 +157,15 @@ pub fn pointer_button(state: &mut State, button: u32, pressed: bool, time: Input
     let serial = SERIAL_COUNTER.next_serial();
     // Click to focus, unless a grab (a popup menu, a drag) owns the pointer.
     if pressed && !pointer.is_grabbed() {
-        let window = state.space.element_under(state.pointer_location).map(|(w, _)| w.clone());
-        if window.is_some() {
-            state.focus(window, serial);
+        use smithay::wayland::shell::wlr_layer::Layer;
+        let pos = state.pointer_location;
+        let upper = state.layer_surface_under(state.upper_layers(), pos);
+        if let Some((layer, _, _)) = upper {
+            state.focus_layer_on_click(&layer);
+        } else if let Some(window) = state.window_under(pos) {
+            state.focus(Some(window), serial);
+        } else if let Some((layer, _, _)) = state.layer_surface_under(&[Layer::Bottom, Layer::Background], pos) {
+            state.focus_layer_on_click(&layer);
         }
     }
     let button_state = if pressed { ButtonState::Pressed } else { ButtonState::Released };
