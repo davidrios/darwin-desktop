@@ -78,17 +78,34 @@ pub enum Action {
     FocusWorkspace(WorkspaceTarget),
     MoveWindow(Direction),
     MoveToWorkspace { target: WorkspaceTarget, follow: bool },
+    /// `hl.dsp.window.drag()` on a mouse bind: move the window under the pointer.
+    MouseDrag,
+    /// `hl.dsp.window.resize()` on a mouse bind: resize it from the nearest corner.
+    MouseResize,
     Exit,
     /// A dispatcher we don't implement yet: warn when used.
     Unsupported(String),
+}
+
+/// A mouse button or wheel direction in a bind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseKey {
+    /// `mouse:272`: a Linux input button code (272 left, 273 right, 274 middle).
+    Button(u32),
+    /// `mouse_down` / `mouse_up` / `mouse_left` / `mouse_right`: the wheel.
+    WheelDown,
+    WheelUp,
+    WheelLeft,
+    WheelRight,
 }
 
 /// A parsed key string.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chord {
     pub mods: Mods,
-    /// Lowercased keysym, so "Q" matches the q key.
+    /// Lowercased keysym, so "Q" matches the q key (NoSymbol for mouse chords).
     pub keysym: Keysym,
+    pub mouse: Option<MouseKey>,
 }
 
 pub fn parse_chord(s: &str) -> Result<Chord, String> {
@@ -105,13 +122,23 @@ pub fn parse_chord(s: &str) -> Result<Chord, String> {
         }
     }
     if key.starts_with("mouse") {
-        return Err(format!("mouse binds aren't supported yet ({s:?})"));
+        let mouse = match key.to_ascii_lowercase().as_str() {
+            "mouse_down" => MouseKey::WheelDown,
+            "mouse_up" => MouseKey::WheelUp,
+            "mouse_left" => MouseKey::WheelLeft,
+            "mouse_right" => MouseKey::WheelRight,
+            k => match k.strip_prefix("mouse:").and_then(|n| n.parse().ok()) {
+                Some(code) => MouseKey::Button(code),
+                None => return Err(format!("unknown mouse key {key:?} in {s:?}")),
+            },
+        };
+        return Ok(Chord { mods: m, keysym: Keysym::new(keysyms::KEY_NoSymbol), mouse: Some(mouse) });
     }
     let keysym = xkb::keysym_from_name(key, xkb::KEYSYM_CASE_INSENSITIVE);
     if keysym.raw() == keysyms::KEY_NoSymbol {
         return Err(format!("unknown key {key:?} in {s:?}"));
     }
-    Ok(Chord { mods: m, keysym: lower(keysym) })
+    Ok(Chord { mods: m, keysym: lower(keysym), mouse: None })
 }
 
 use smithay::input::keyboard::keysyms;
@@ -151,7 +178,9 @@ mod tests {
         assert_eq!(q.keysym.raw(), keysyms::KEY_q);
         assert_eq!(parse_chord("SUPER + left").unwrap().keysym.raw(), keysyms::KEY_Left);
         assert_eq!(parse_chord("XF86AudioMute").unwrap().mods, Mods::default());
-        assert!(parse_chord("SUPER + mouse:272").is_err());
+        assert_eq!(parse_chord("SUPER + mouse:272").unwrap().mouse, Some(MouseKey::Button(272)));
+        assert_eq!(parse_chord("SUPER + mouse_down").unwrap().mouse, Some(MouseKey::WheelDown));
+        assert!(parse_chord("SUPER + mouse:x").is_err());
         assert!(parse_chord("HYPER + Q").is_err());
     }
 

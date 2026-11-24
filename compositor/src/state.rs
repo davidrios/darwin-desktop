@@ -92,6 +92,12 @@ pub struct State {
     pub anim_frame: u64,
     /// Hyprland-compatible IPC sockets.
     pub ipc: crate::ipc::Ipc,
+    /// A mouse-bind move or resize in progress.
+    pub drag: Option<crate::mouse::Drag>,
+    /// Buttons whose press was a bind: their release isn't sent either.
+    pub bound_buttons: std::collections::HashSet<u32>,
+    /// A trackpad workspace swipe in progress.
+    pub swipe: crate::gesture::Swipe,
     pub children: Vec<Child>,
 }
 
@@ -169,6 +175,9 @@ impl State {
             closing: Vec::new(),
             anim_frame: 0,
             ipc: crate::ipc::Ipc::new(loop_handle),
+            drag: None,
+            bound_buttons: Default::default(),
+            swipe: Default::default(),
             children: Vec::new(),
         }
     }

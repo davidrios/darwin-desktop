@@ -4,8 +4,8 @@
 //! The `hl` API is implemented as far as the compositor has the features:
 //! `hl.config`, `hl.bind` with the `hl.dsp.*` dispatchers in `binds::Action`,
 //! `hl.exec_cmd`, `hl.dispatch`, `hl.env`, `hl.on("hyprland.start")`,
-//! `hl.curve`, `hl.animation`. Everything else in `hl` (window rules,
-//! monitors, gestures, ...) is accepted, warned about once, and ignored, so a
+//! `hl.curve`, `hl.animation`, `hl.gesture` (workspace swipes). Everything
+//! else in `hl` (window rules, monitors, ...) is accepted, warned about once, and ignored, so a
 //! full Hyprland config still loads. SUPER is Command.
 
 use std::{
@@ -150,6 +150,31 @@ pub struct DwindleConfig {
     pub use_active_for_splits: bool,
 }
 
+/// An `hl.gesture`: a trackpad swipe with `fingers` fingers along
+/// `direction` runs `action` (only "workspace" is supported).
+#[derive(Clone, Debug)]
+pub struct Gesture {
+    pub fingers: u32,
+    /// "horizontal" or "vertical" (also "left"/"right"/"up"/"down": their axis).
+    pub direction: String,
+    pub action: String,
+}
+
+/// The `gestures` section's workspace swipe options, Hyprland's defaults.
+#[derive(Clone, Debug)]
+pub struct SwipeConfig {
+    /// How far (trackpad units, about Hyprland's) a full workspace swipe is.
+    pub distance: f64,
+    /// Release past this fraction to switch, else snap back.
+    pub cancel_ratio: f64,
+    /// Release faster than this (units per 10 ms) to switch regardless.
+    pub min_speed_to_force: f64,
+    /// Content follows the fingers (swiping left shows the next workspace).
+    pub invert: bool,
+    /// Swiping past the last workspace makes a new one.
+    pub create_new: bool,
+}
+
 /// `decoration.shadow`, with Hyprland's defaults.
 #[derive(Clone, Debug)]
 pub struct ShadowConfig {
@@ -216,6 +241,10 @@ pub struct Settings {
     pub dwindle: DwindleConfig,
     /// 0: click to focus, 1+: keyboard focus follows the pointer.
     pub follow_mouse: i64,
+    /// `input.touchpad.scroll_factor`.
+    pub touchpad_scroll_factor: f64,
+    pub gestures: Vec<Gesture>,
+    pub swipe: SwipeConfig,
     pub animations_enabled: bool,
     pub curves: BTreeMap<String, Curve>,
     pub animations: BTreeMap<String, AnimationConfig>,
@@ -285,6 +314,15 @@ impl Settings {
                 use_active_for_splits: num("dwindle.use_active_for_splits", 1.0) != 0.0,
             },
             follow_mouse: num("input.follow_mouse", 1.0) as i64,
+            touchpad_scroll_factor: num("input.touchpad.scroll_factor", 1.0).max(0.0),
+            gestures: Vec::new(),
+            swipe: SwipeConfig {
+                distance: num("gestures.workspace_swipe_distance", 300.0).max(1.0),
+                cancel_ratio: num("gestures.workspace_swipe_cancel_ratio", 0.5).clamp(0.0, 1.0),
+                min_speed_to_force: num("gestures.workspace_swipe_min_speed_to_force", 30.0).max(0.0),
+                invert: num("gestures.workspace_swipe_invert", 1.0) != 0.0,
+                create_new: num("gestures.workspace_swipe_create_new", 1.0) != 0.0,
+            },
             animations_enabled: num("animations.enabled", 1.0) != 0.0,
             curves: BTreeMap::new(),
             animations: BTreeMap::new(),
@@ -303,6 +341,7 @@ struct Shared {
     queue: Vec<Action>,
     curves: BTreeMap<String, Curve>,
     animations: BTreeMap<String, AnimationConfig>,
+    gestures: Vec<Gesture>,
     warned: HashSet<String>,
 }
 
@@ -389,6 +428,7 @@ impl Config {
             let mut settings = Settings::from_flat(&s.flat);
             settings.curves = s.curves.clone();
             settings.animations = s.animations.clone();
+            settings.gestures = s.gestures.clone();
             settings
         };
         tracing::info!("config: {} binds, layout {}", shared.borrow().binds.len(), settings.layout);
@@ -401,8 +441,22 @@ impl Config {
         shared
             .binds
             .iter()
-            .position(|b| b.enabled.get() && b.chord.mods == mods && b.chord.keysym == keysym)
+            .position(|b| b.enabled.get() && b.chord.mouse.is_none() && b.chord.mods == mods && b.chord.keysym == keysym)
             .map(BindHit)
+    }
+
+    /// The bind for a mouse button or wheel chord, if one is enabled.
+    pub fn find_mouse_bind(&self, mods: crate::binds::Mods, key: crate::binds::MouseKey) -> Option<BindHit> {
+        let shared = self.shared.borrow();
+        shared.binds.iter().position(|b| b.enabled.get() && b.chord.mods == mods && b.chord.mouse == Some(key)).map(BindHit)
+    }
+
+    /// The action a bind runs directly (not a Lua function).
+    pub fn bind_action(&self, hit: &BindHit) -> Option<Action> {
+        match &self.shared.borrow().binds[hit.0].run {
+            BindRun::Action(a) => Some(a.clone()),
+            BindRun::Lua(_) => None,
+        }
     }
 
     /// Runs a bind: an action to perform, or a Lua function whose
@@ -657,6 +711,27 @@ fn install_api(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
         )?;
     }
 
+    // hl.gesture({ fingers, direction, action })
+    {
+        let shared = shared.clone();
+        hl.set(
+            "gesture",
+            lua.create_function(move |_, t: Table| {
+                let g = Gesture {
+                    fingers: t.get::<Option<u32>>("fingers")?.unwrap_or(3),
+                    direction: opt_str(&t, "direction")?.unwrap_or_else(|| "horizontal".into()),
+                    action: opt_str(&t, "action")?.unwrap_or_default(),
+                };
+                let mut s = shared.borrow_mut();
+                if g.action != "workspace" {
+                    s.warn_once(&format!("hl.gesture action {:?}", g.action));
+                }
+                s.gestures.push(g);
+                Ok(())
+            })?,
+        )?;
+    }
+
     // hl.animation({ leaf, enabled, speed, bezier | spring, style })
     {
         let shared = shared.clone();
@@ -729,7 +804,9 @@ fn install_api(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
             lua.create_userdata(Dsp(action))
         })?,
     )?;
-    // Unknown window dispatchers (pseudo, pin, drag, resize, ...).
+    window.set("drag", lua.create_function(|lua, _: MultiValue| lua.create_userdata(Dsp(Action::MouseDrag)))?)?;
+    window.set("resize", lua.create_function(|lua, _: MultiValue| lua.create_userdata(Dsp(Action::MouseResize)))?)?;
+    // Unknown window dispatchers (pseudo, pin, ...).
     window.set_metatable(Some({
         let mt = lua.create_table()?;
         mt.set(

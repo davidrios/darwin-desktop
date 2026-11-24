@@ -12,7 +12,9 @@ Layer-shell (bars, launchers), waybar (`docs/waybar-notes.md`) and a Hyprland IP
 
 Shadows and blur (step 4) are written; the shaders compile and every pipeline builds in a unit test (`render::tests`); seen working by hand (2026-11-24).
 
-Still to do in M2: trackpad gestures, groups, special workspaces, window rules, mouse binds.
+Mouse binds and the trackpad workspace swipe (step 5) are written and unit-tested (the resize and chord parts); seen working by hand (2026-11-24).
+
+Still to do in M2: groups, special workspaces, window rules.
 
 ## Config: Hyprland's Lua config
 
@@ -98,3 +100,23 @@ Not yet: special workspaces, monitor events (one output), `hyprctl` itself (not 
 What shows it: a window that isn't opaque (not an XRGB buffer and no opaque region over its whole geometry: blur is invisible behind opaque pixels and skipped). Tiled windows show the background (clear colour, background and bottom layers) blurred once per frame, as Hyprland's `new_optimizations`; floating ones blur everything drawn under them at that point, unless `xray`. The blurred backdrop is drawn rounded under the window's content, with its alpha.
 
 Not yet: blur for layers and popups (Hyprland needs layer rules / `blur.popups` for those), `rounding_power` other than 2, blurring only the window's region instead of the whole output (live blur costs a full-output blur per floating translucent window per frame), `ignore_opacity`, `special`, the blur variants (glass, acrylic, ...).
+
+## Mouse binds
+
+`compositor/src/mouse.rs`. Bind keys `mouse:<code>` (Linux button codes: 272 left, 273 right, 274 middle) and `mouse_down`/`mouse_up`/`mouse_left`/`mouse_right` (the wheel) parse into mouse chords (`binds::MouseKey`). A button bind's press and its release stay with the compositor.
+
+- `hl.dsp.window.drag()`: a floating window follows the pointer. A tiled one moves with it (drawn displaced, above the others) and, released over another tile, swaps places with it; released elsewhere it slides back.
+- `hl.dsp.window.resize()`: from the corner nearest where the drag started. Floating: the window is configured to the new size (min 50×50), the far corner staying put. Tiled: `Dwindle::resize`, a port of Hyprland's `resizeTarget` with `smart_resizing` (for each axis the nearest split on the dragged side takes the movement, the nearest on the other side is corrected so the opposite edge stays). While resizing tiles every window follows without animating, as Hyprland with `misc:animate_manual_resizes` off.
+- Wheel binds fire once per notch of a mouse wheel; trackpad scrolling never triggers them (it would fire dozens of times a swipe; trackpads have gestures).
+
+The cursor is a closed hand while moving and a diagonal resize arrow while resizing.
+
+Trackpad scrolling (`input.rs`): macOS's precise deltas are pixels, while Wayland clients expect libinput's finger units (GTK multiplies finger scrolling by 2.5, `MAGIC_SCROLL_FACTOR`), so they're scaled by 0.2 (tuned by hand: 0.4, from GTK's factor alone, felt twice too fast; both sides are logical units, so the screen scale doesn't enter) and by `input.touchpad.scroll_factor`. macOS's momentum events after the fingers lift are dropped: clients do their own kinetic scrolling from the axis stop, as on Linux; forwarding both made scrolls fly. The direction is macOS's (its natural scrolling setting), not `input.touchpad.natural_scroll`.
+
+## Trackpad gestures
+
+`compositor/src/gesture.rs`. The view takes raw trackpad touches (`setAllowedTouchTypes(Indirect)`, `touches…WithEvent:`: public AppKit, normalized finger positions and the pad's size). `hl.gesture({ fingers, direction, action = "workspace" })` with that many fingers down: after a 4-point dead zone the centroid's movement along the gesture's axis drags the active workspace and its neighbour (one number up or down; past the end only with `workspace_swipe_create_new`), drawn through the workspace transition. Lifting finishes the switch past `workspace_swipe_cancel_ratio` or above `workspace_swipe_min_speed_to_force`, else it slides back; both use the `workspaces` animation. `workspace_swipe_distance` is in Hyprland-like units: a trackpad point is 3 units, so the default 300 is about 3.5 cm. `workspace_swipe_invert` (default on) makes the content follow the fingers.
+
+macOS still runs its own three/four-finger swipes (Spaces, Mission Control) from the same touches: with a three-finger `hl.gesture`, set those to four fingers (or off) in System Settings > Trackpad.
+
+Only the workspace action; other `hl.gesture` actions warn once.

@@ -589,7 +589,7 @@ impl Transition {
         self.out_alpha.tick(now) | self.out_offset.tick(now) | self.in_alpha.tick(now) | self.in_offset.tick(now)
     }
 
-    fn active(&self) -> bool {
+    pub fn active(&self) -> bool {
         self.out_alpha.active() || self.out_offset.active() || self.in_alpha.active() || self.in_offset.active()
     }
 }
@@ -639,7 +639,8 @@ impl State {
         let loc = self.space.element_location(window)?;
         let full = smithay::utils::Rectangle::new(loc, window.geometry().size);
         let r = crate::wm::clip_of(window).and_then(|c| full.intersection(c)).unwrap_or(full);
-        Some(Rect { x: r.loc.x as f64, y: r.loc.y as f64, w: r.size.w as f64, h: r.size.h as f64 })
+        let (dx, dy) = self.drag_offset(window).unwrap_or_default();
+        Some(Rect { x: r.loc.x as f64 + dx, y: r.loc.y as f64 + dy, w: r.size.w as f64, h: r.size.h as f64 })
     }
 
     fn output_rect(&self) -> Rect {
@@ -670,6 +671,7 @@ impl State {
                 })
             });
             let floating = self.is_floating_here(&window);
+            let dragging = self.dragging(&window);
             let t = &self.timings;
             window.user_data().insert_if_missing(|| AnimSlot::new(None));
             let mut slot = window.user_data().get::<AnimSlot>().unwrap().borrow_mut();
@@ -702,7 +704,7 @@ impl State {
                 }
                 Some(a) => {
                     let current = *a.rect.goal();
-                    if floating && !a.rect.active() && (current.x, current.y) == (goal.x, goal.y) {
+                    if dragging || (floating && !a.rect.active() && (current.x, current.y) == (goal.x, goal.y)) {
                         // A floating client resizing itself: follow it.
                         a.rect.warp(goal);
                     } else {
@@ -728,7 +730,8 @@ impl State {
                     }
                 }
             }
-            if !tr.active() {
+            // A swipe holds the transition still while the fingers are down.
+            if !tr.active() && !self.swipe.active() {
                 self.wm.transition = None;
             }
         }

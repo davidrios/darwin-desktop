@@ -154,7 +154,7 @@ impl State {
     }
 
     /// The output minus what layer surfaces reserve (a bar) and `gaps_out`.
-    fn work_area(&self) -> Rect {
+    pub fn work_area(&self) -> Rect {
         let g = self.config.settings.gaps_out;
         let zone = smithay::desktop::layer_map_for_output(&self.output).non_exclusive_zone();
         let (x, y, w, h) = (zone.loc.x as f64, zone.loc.y as f64, zone.size.w as f64, zone.size.h as f64);
@@ -546,6 +546,8 @@ impl State {
                 let on = !self.is_fullscreen(&w);
                 self.set_fullscreen(&w, on);
             }
+            // Only meaningful on a mouse bind (input.rs starts the drag).
+            Action::MouseDrag | Action::MouseResize => tracing::debug!("drag/resize dispatcher outside a mouse bind"),
             Action::Unsupported(name) => tracing::warn!("{name} is not supported yet"),
         }
     }
@@ -560,7 +562,7 @@ fn min_size(window: &Window) -> Size<i32, Logical> {
 }
 
 /// Size and tiled/fullscreen states for a toplevel.
-fn configure(window: &Window, size: Option<Size<i32, Logical>>, tiled: bool, fullscreen: bool) {
+pub fn configure(window: &Window, size: Option<Size<i32, Logical>>, tiled: bool, fullscreen: bool) {
     let Some(t) = window.toplevel() else { return };
     t.with_pending_state(|s| {
         if size.is_some() || tiled || fullscreen {

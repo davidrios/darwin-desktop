@@ -18,6 +18,12 @@ use crate::{
     state::State,
 };
 
+/// macOS trackpad points to libinput-like finger scroll units. Both sides
+/// are logical units, so no screen scale is involved; GTK multiplies finger
+/// scrolling by 2.5 and macOS deltas are already accelerated. Tuned by hand
+/// (2026-11-24): 0.4 still felt about twice too fast.
+const TOUCHPAD_SCROLL_SCALE: f64 = 0.2;
+
 /// evdev button codes (`linux/input-event-codes.h`).
 pub const BTN_LEFT: u32 = 0x110;
 pub const BTN_RIGHT: u32 = 0x111;
@@ -134,6 +140,11 @@ pub fn is_quit_chord(event: &NSEvent) -> bool {
 
 pub fn pointer_motion(state: &mut State, location: Point<f64, Logical>, time: InputTime) {
     state.pointer_location = location;
+    // A mouse-bind drag owns the pointer.
+    if state.drag.is_some() {
+        state.drag_motion(location);
+        return;
+    }
     let under = state.surface_under(location);
     if under.is_none() {
         // Over no client: the default cursor (clients set theirs on enter).
@@ -155,6 +166,35 @@ pub fn pointer_motion(state: &mut State, location: Point<f64, Logical>, time: In
 pub fn pointer_button(state: &mut State, button: u32, pressed: bool, time: InputTime) {
     let Some(pointer) = state.seat.get_pointer() else { return };
     let serial = SERIAL_COUNTER.next_serial();
+    // Mouse binds (Cmd+drag): the press and its release stay with the compositor.
+    if !pressed {
+        if state.drag.as_ref().is_some_and(|d| d.button == button) {
+            state.end_drag();
+            state.bound_buttons.remove(&button);
+            return;
+        }
+        if state.bound_buttons.remove(&button) {
+            return;
+        }
+    } else if !pointer.is_grabbed() && state.drag.is_none() {
+        let mods = state.seat.get_keyboard().map(|k| Mods::from(&k.modifier_state())).unwrap_or_default();
+        let hit = state.config.find_mouse_bind(mods, crate::binds::MouseKey::Button(button));
+        if let Some(hit) = hit {
+            let taken = match state.config.bind_action(&hit) {
+                Some(action) => state.mouse_bind(button, action),
+                None => {
+                    for action in state.config.run_bind(hit) {
+                        state.run_action(action);
+                    }
+                    true
+                }
+            };
+            if taken {
+                state.bound_buttons.insert(button);
+                return;
+            }
+        }
+    }
     // Click to focus, unless a grab (a popup menu, a drag) owns the pointer.
     if pressed && !pointer.is_grabbed() {
         use smithay::wayland::shell::wlr_layer::Layer;
@@ -178,8 +218,42 @@ pub fn scroll(state: &mut State, event: &NSEvent) {
     let time = event_time(event);
     // macOS deltas are already "natural"-adjusted and point the other way from Wayland's axes.
     let (dx, dy) = (-event.scrollingDeltaX(), -event.scrollingDeltaY());
+    // Wheel binds (Cmd+scroll), one per notch. Trackpad scrolling doesn't
+    // trigger them: it would fire dozens of times a swipe.
+    if !event.hasPreciseScrollingDeltas() {
+        use crate::binds::MouseKey;
+        let mods = state.seat.get_keyboard().map(|k| Mods::from(&k.modifier_state())).unwrap_or_default();
+        let key = if dy > 0.0 {
+            Some(MouseKey::WheelDown)
+        } else if dy < 0.0 {
+            Some(MouseKey::WheelUp)
+        } else if dx > 0.0 {
+            Some(MouseKey::WheelRight)
+        } else if dx < 0.0 {
+            Some(MouseKey::WheelLeft)
+        } else {
+            None
+        };
+        if let Some(hit) = key.and_then(|k| state.config.find_mouse_bind(mods, k)) {
+            for action in state.config.run_bind(hit) {
+                state.run_action(action);
+            }
+            return;
+        }
+    }
     let mut frame;
     if event.hasPreciseScrollingDeltas() {
+        // macOS's own momentum after the fingers lift: dropped. Wayland
+        // clients do their own kinetic scrolling from the stop event, as on
+        // Linux; passing both made scrolls fly.
+        if event.momentumPhase() != NSEventPhase::None {
+            return;
+        }
+        // macOS deltas are pixels; clients expect libinput's finger units,
+        // which GTK multiplies by 2.5 (MAGIC_SCROLL_FACTOR). Scale to match,
+        // times Hyprland's `input.touchpad.scroll_factor`.
+        let factor = TOUCHPAD_SCROLL_SCALE * state.config.settings.touchpad_scroll_factor;
+        let (dx, dy) = (dx * factor, dy * factor);
         frame = AxisFrame::new(time).source(AxisSource::Finger);
         if dx != 0.0 {
             frame = frame.value(Axis::Horizontal, dx);
@@ -188,9 +262,7 @@ pub fn scroll(state: &mut State, event: &NSEvent) {
             frame = frame.value(Axis::Vertical, dy);
         }
         let phase = event.phase();
-        let momentum = event.momentumPhase();
-        let ended = phase.contains(NSEventPhase::Ended) || phase.contains(NSEventPhase::Cancelled);
-        if ended && momentum == NSEventPhase::None {
+        if phase.contains(NSEventPhase::Ended) || phase.contains(NSEventPhase::Cancelled) {
             frame = frame.stop(Axis::Horizontal).stop(Axis::Vertical);
         }
     } else {

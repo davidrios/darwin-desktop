@@ -318,6 +318,27 @@ define_class!(
             });
         }
 
+        // Trackpad touches (indirect touches), for gestures.
+        #[unsafe(method(touchesBeganWithEvent:))]
+        fn touches_began(&self, event: &NSEvent) {
+            with_app(|app| crate::gesture::touches(&mut app.state, event));
+        }
+
+        #[unsafe(method(touchesMovedWithEvent:))]
+        fn touches_moved(&self, event: &NSEvent) {
+            with_app(|app| crate::gesture::touches(&mut app.state, event));
+        }
+
+        #[unsafe(method(touchesEndedWithEvent:))]
+        fn touches_ended(&self, event: &NSEvent) {
+            with_app(|app| crate::gesture::touches(&mut app.state, event));
+        }
+
+        #[unsafe(method(touchesCancelledWithEvent:))]
+        fn touches_cancelled(&self, event: &NSEvent) {
+            with_app(|app| crate::gesture::touches(&mut app.state, event));
+        }
+
         /// The display link: one call per display refresh.
         #[unsafe(method(tick:))]
         fn tick(&self, _link: &CADisplayLink) {
@@ -331,7 +352,10 @@ define_class!(
 impl CompositorView {
     fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ViewIvars::default());
-        unsafe { msg_send![super(this), initWithFrame: frame] }
+        let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        // Raw trackpad touches, for gestures (gesture.rs).
+        view.setAllowedTouchTypes(objc2_app_kit::NSTouchTypeMask::Indirect);
+        view
     }
 
     fn motion(&self, event: &NSEvent) {
