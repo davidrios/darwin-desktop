@@ -5,10 +5,11 @@
 #                   Wayland takes settings from the xdg-desktop-portal Settings
 #                   portal; without one (no D-Bus session yet) it falls back to
 #                   its built-in "menu:minimize,maximize,close". A user's own
-#                   ~/.config/gtk-4.0/settings.ini still wins. A waybar
-#                   config of modules that work here (Hyprland IPC, clock,
-#                   disk, load), with waybar's own style.css; ~/.config/waybar
-#                   wins.
+#                   ~/.config/gtk-4.0/settings.ini still wins.
+#   WAYBAR_CONFIG_DIR  a waybar config of modules that work here (Hyprland
+#                   IPC, clock, disk, load), with waybar's own style.css. Set
+#                   only without ~/.config/waybar: waybar reads this variable
+#                   first and ignores XDG_CONFIG_DIRS.
 #   XDG_DATA_DIRS   GSettings schemas: GTK's and gsettings-desktop-schemas;
 #                   icon themes (Adwaita, hicolor) for GTK 3, which has none built in
 #   GDK_PIXBUF_MODULE_FILE, GST_PLUGIN_SYSTEM_PATH_1_0   SVG icons, media
@@ -64,12 +65,12 @@ let
       tooltip-format = "<tt>{calendar}</tt>";
     };
   };
+  waybarDefaults = writeTextDir "config.jsonc" (builtins.toJSON waybarConfig);
   gtkDefaults = symlinkJoin {
     name = "gtk-session-defaults";
     paths = [
       (writeTextDir "gtk-4.0/settings.ini" settings)
       (writeTextDir "gtk-3.0/settings.ini" settings)
-      (writeTextDir "waybar/config.jsonc" (builtins.toJSON waybarConfig))
     ];
   };
 in
@@ -83,10 +84,13 @@ writeShellApplication {
     gtk-layer-shell.dev
   ];
   text = ''
-    export XDG_CONFIG_DIRS="${gtkDefaults}:${waybar}/etc/xdg:''${XDG_CONFIG_DIRS:-/etc/xdg}"
+    export XDG_CONFIG_DIRS="${gtkDefaults}:''${XDG_CONFIG_DIRS:-/etc/xdg}"
     export XDG_DATA_DIRS="${schemas gsettings-desktop-schemas}:${schemas gtk4}:${schemas gtk3}:${vte}/share:${gtk4}/share:${gtk3}/share:${adwaita-icon-theme}/share:${hicolor-icon-theme}/share''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
     export GDK_PIXBUF_MODULE_FILE="${librsvg}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
     export GST_PLUGIN_SYSTEM_PATH_1_0="${gst_all_1.gst-plugins-base}/lib/gstreamer-1.0:${gst_all_1.gstreamer.out}/lib/gstreamer-1.0"
+    if [ -z "''${WAYBAR_CONFIG_DIR:-}" ] && [ ! -e "''${XDG_CONFIG_HOME:-$HOME/.config}/waybar" ]; then
+      export WAYBAR_CONFIG_DIR="${waybarDefaults}"
+    fi
     export TERMINAL="''${TERMINAL:-vte-2.91-gtk4}"
     exec "''${COMPOSITOR:-compositor}" "$@"
   '';

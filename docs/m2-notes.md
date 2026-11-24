@@ -6,9 +6,9 @@ Checked by hand with VTE terminals and GTK's widget factory: Lua config, keybind
 
 Run it: `nix run .#session` (or `COMPOSITOR=…/target/debug/compositor nix run .#session -- <client>` for a development build).
 
-Step 3 (animations) is written and unit-tested, waiting for a check by hand.
+Step 3 (animations) is written and unit-tested; seen working by hand (2026-11-23).
 
-Layer-shell (bars, launchers), waybar (`docs/waybar-notes.md`) and a Hyprland IPC subset for its modules are written, waiting for a check by hand.
+Layer-shell (bars, launchers), waybar (`docs/waybar-notes.md`) and a Hyprland IPC subset for its modules are written; waybar shows up as a bar (2026-11-23), its Hyprland modules not yet checked in detail.
 
 Still to do in M2: shadows and blur, trackpad gestures, groups, special workspaces, window rules, mouse binds.
 
@@ -81,6 +81,6 @@ Requests (`[flags]/command`, all answered in JSON): `monitors`, `workspaces`, `a
 
 Events: each frame a snapshot of the workspaces (the active one and any with windows), windows (workspace, app id, title), focus, fullscreen and keyboard layout is compared with the last one, and the differences go out as `createworkspace[v2]`, `workspace[v2]`, `openwindow`, `movewindow[v2]`, `windowtitle[v2]`, `closewindow`, `activewindow[v2]`, `fullscreen`, `activelayout`, `destroyworkspace[v2]`. Window addresses are per-window counters. The one monitor is `darwin-0`, the `wl_output` name waybar matches against.
 
-The session (`nix run .#session`) puts waybar and `gtk-layer-demo` on `PATH` and ships a waybar config of modules that work here (workspaces, window title, language, disk, load, clock); `~/.config/waybar` wins.
+The session (`nix run .#session -- -- waybar`) puts waybar and `gtk-layer-demo` on `PATH` and ships a waybar config of modules that work here (workspaces, window title, language, disk, load, clock) through `WAYBAR_CONFIG_DIR`, set only when there's no `~/.config/waybar`: waybar ignores `XDG_CONFIG_DIRS` and otherwise falls back to its own Sway example config.
 
 Not yet: special workspaces, monitor events (one output), `hyprctl` itself (not built), `keyword`/`reload`/`binds`/`layers` requests.
