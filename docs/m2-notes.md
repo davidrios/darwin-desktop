@@ -10,7 +10,9 @@ Step 3 (animations) is written and unit-tested; seen working by hand (2026-11-23
 
 Layer-shell (bars, launchers), waybar (`docs/waybar-notes.md`) and a Hyprland IPC subset for its modules are written; waybar shows up as a bar (2026-11-23), its Hyprland modules not yet checked in detail.
 
-Still to do in M2: shadows and blur, trackpad gestures, groups, special workspaces, window rules, mouse binds.
+Shadows and blur (step 4) are written; the shaders compile and every pipeline builds in a unit test (`render::tests`); seen working by hand (2026-11-24).
+
+Still to do in M2: trackpad gestures, groups, special workspaces, window rules, mouse binds.
 
 ## Config: Hyprland's Lua config
 
@@ -84,3 +86,15 @@ Events: each frame a snapshot of the workspaces (the active one and any with win
 The session (`nix run .#session -- -- waybar`) puts waybar and `gtk-layer-demo` on `PATH` and ships a waybar config of modules that work here (workspaces, window title, language, disk, load, clock) through `WAYBAR_CONFIG_DIR`, set only when there's no `~/.config/waybar`: waybar ignores `XDG_CONFIG_DIRS` and otherwise falls back to its own Sway example config.
 
 Not yet: special workspaces, monitor events (one output), `hyprctl` itself (not built), `keyword`/`reload`/`binds`/`layers` requests.
+
+## Shadows and blur
+
+`compositor/src/render.rs`, Hyprland's shaders ported to Metal (BSD-3, attributed in the shader source).
+
+**Shadows** (`decoration.shadow`: `enabled`, `range`, `render_power`, `sharp`, `color`, `color_inactive`, `offset`, `scale`; Hyprland's defaults): the box is the window and its border grown by `range`, scaled from its centre and offset; corners fall off with `render_power` from radius `range + rounding + border`, edges linearly to the power; nothing is drawn under the window itself (Hyprland's cut-out). Focused windows use `color`, others `color_inactive` if set. Shadows follow the animated rectangle and alpha; fullscreen windows have none.
+
+**Blur** (`decoration.blur`: `enabled`, `size`, `passes`, `xray`, `noise`, `contrast`, `brightness`, `vibrancy`, `vibrancy_darkness`; Hyprland's defaults): dual Kawase as Hyprland does it. A prepare pass (contrast, brightness), `passes` downsamples each half the size (with vibrancy), as many upsamples, a finish pass (noise, brightness). Our chain uses real half-size textures where Hyprland draws into shrinking regions of full-size buffers; sample offsets are scaled to match (`radius` source pixels down, `radius/2` up). The drawable is readable (`framebufferOnly` off): blurring ends the frame's render pass, runs the passes in the same command buffer and starts a new pass that loads what was there.
+
+What shows it: a window that isn't opaque (not an XRGB buffer and no opaque region over its whole geometry: blur is invisible behind opaque pixels and skipped). Tiled windows show the background (clear colour, background and bottom layers) blurred once per frame, as Hyprland's `new_optimizations`; floating ones blur everything drawn under them at that point, unless `xray`. The blurred backdrop is drawn rounded under the window's content, with its alpha.
+
+Not yet: blur for layers and popups (Hyprland needs layer rules / `blur.popups` for those), `rounding_power` other than 2, blurring only the window's region instead of the whole output (live blur costs a full-output blur per floating translucent window per frame), `ignore_opacity`, `special`, the blur variants (glass, acrylic, ...).

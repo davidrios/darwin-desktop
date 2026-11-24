@@ -104,7 +104,231 @@ fragment float4 border_fragment(VOut in [[stage_in]], constant Quad &q [[buffer(
     }
     return color * coverage * q.alpha;
 }
+
+// ---- shadows (Hyprland's shadow.glsl, BSD 3-Clause, see tests/HYPRLAND-LICENSE) ----
+
+struct Shadow {
+    float4 dst;        // normalized device coordinates
+    float4 rect;       // the shadow's box in pixels
+    float4 window;     // the window it's cut out under, in pixels (w <= 0: none)
+    float4 color;      // premultiplied, times the window's alpha
+    float radius;      // corner radius (window rounding + border), pixels
+    float range;       // falloff distance, pixels
+    float power;       // falloff exponent
+    float window_radius;
+};
+
+vertex VOut shadow_vertex(uint vid [[vertex_id]], constant Shadow &s [[buffer(0)]]) {
+    float2 corner = float2(vid & 1, vid >> 1);
+    VOut o;
+    o.pos = float4(s.dst.xy + corner * s.dst.zw, 0.0, 1.0);
+    o.uv = corner;
+    return o;
+}
+
+static float shadow_falloff(float d, float radius, float range, float power) {
+    if (d > radius) { return 0.0; }
+    if (d > radius - range) { return pow((range - (d - radius + range)) / range, power); }
+    return 1.0;
+}
+
+fragment float4 shadow_fragment(VOut in [[stage_in]], constant Shadow &s [[buffer(0)]]) {
+    float2 full = s.rect.zw;
+    float2 p = in.pos.xy - s.rect.xy;
+    float radius = s.range + s.radius;
+    float2 tl = float2(radius);
+    float2 br = full - radius;
+    float a = 1.0;
+    bool corner = true;
+    if (p.x < tl.x && p.y < tl.y) {
+        a = shadow_falloff(length(p - tl), radius, s.range, s.power);
+    } else if (p.x < tl.x && p.y > br.y) {
+        a = shadow_falloff(length(p - float2(tl.x, br.y)), radius, s.range, s.power);
+    } else if (p.x > br.x && p.y < tl.y) {
+        a = shadow_falloff(length(p - float2(br.x, tl.y)), radius, s.range, s.power);
+    } else if (p.x > br.x && p.y > br.y) {
+        a = shadow_falloff(length(p - br), radius, s.range, s.power);
+    } else {
+        corner = false;
+    }
+    if (!corner && s.range > 0.0) {
+        float m = min(min(p.y, full.y - p.y), min(p.x, full.x - p.x));
+        if (m < s.range) { a = pow(m / s.range, s.power); }
+    }
+    if (s.window.z > 0.0) {
+        // Not under the window itself (Hyprland's ignore_window).
+        a *= saturate(0.5 + rounded_rect(in.pos.xy, s.window, s.window_radius));
+    }
+    return s.color * a;
+}
+
+// ---- blur: Hyprland's dual Kawase passes (blurprepare, blur1, blur2,
+// blurFinish; BSD 3-Clause, see tests/HYPRLAND-LICENSE) ----
+
+struct Blur {
+    float2 halfpixel;
+    float radius;
+    float passes;
+    float vibrancy;
+    float vibrancy_darkness;
+    float contrast;
+    float brightness;
+    float noise;
+    float3 _pad;
+};
+
+static float3 gain(float3 src, float k) {
+    float3 x = saturate(src);
+    float3 t = step(0.5, x);
+    float3 y = mix(x, 1.0 - x, t);
+    float3 a = 0.5 * pow(2.0 * y, float3(k));
+    return mix(a, 1.0 - a, t);
+}
+
+fragment float4 blur_prepare(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Blur &b [[buffer(1)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float4 c = tex.sample(s, in.uv);
+    if (c.a <= 0.0) { return float4(0.0); }
+    if (b.contrast != 1.0) { c.rgb = gain(c.rgb / c.a, b.contrast) * c.a; }
+    c.rgb *= max(1.0, b.brightness);
+    return c;
+}
+
+static float double_circle_sigmoid(float x, float a) {
+    a = saturate(a);
+    if (x <= a) { return a - sqrt(a * a - x * x); }
+    return a + sqrt(pow(1.0 - a, 2.0) - pow(x - 1.0, 2.0));
+}
+
+static float3 rgb2hsl(float3 col) {
+    float minc = min(col.r, min(col.g, col.b));
+    float maxc = max(col.r, max(col.g, col.b));
+    float delta = maxc - minc;
+    float lum = (minc + maxc) * 0.5;
+    float sat = 0.0;
+    float hue = 0.0;
+    if (lum > 0.0 && lum < 1.0) {
+        float mul = (lum < 0.5) ? lum : (1.0 - lum);
+        sat = delta / (mul * 2.0);
+    }
+    if (delta > 0.0) {
+        float3 maxv = float3(maxc);
+        float3 masks = float3(maxv == col) * float3(maxv != float3(col.g, col.b, col.r));
+        float3 adds = float3(0.0, 2.0, 4.0) + float3(col.g - col.b, col.b - col.r, col.r - col.g) / delta;
+        hue += dot(adds, masks);
+        hue /= 6.0;
+        if (hue < 0.0) { hue += 1.0; }
+    }
+    return float3(hue, sat, lum);
+}
+
+static float3 hsl2rgb(float3 col) {
+    const float onethird = 1.0 / 3.0;
+    const float twothird = 2.0 / 3.0;
+    const float rcpsixth = 6.0;
+    float hue = col.x, sat = col.y, lum = col.z;
+    float3 xt = float3(0.0);
+    if (hue < onethird) {
+        xt = float3(rcpsixth * (onethird - hue), rcpsixth * hue, 0.0);
+    } else if (hue < twothird) {
+        xt = float3(0.0, rcpsixth * (twothird - hue), rcpsixth * (hue - onethird));
+    } else {
+        xt = float3(rcpsixth * (hue - twothird), 0.0, rcpsixth * (1.0 - hue));
+    }
+    xt = min(xt, 1.0);
+    float3 ct = (2.0 * sat * xt) + (1.0 - sat);
+    return lum >= 0.5 ? ((1.0 - lum) * ct) + (2.0 * lum - 1.0) : lum * ct;
+}
+
+// Downsample (blur1): `in.uv` samples the bigger source; vibrancy boosts saturation.
+fragment float4 blur_down(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Blur &b [[buffer(1)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float2 uv = in.uv;
+    float2 h = b.halfpixel * b.radius;
+    float4 sum = tex.sample(s, uv) * 4.0;
+    sum += tex.sample(s, uv - h);
+    sum += tex.sample(s, uv + h);
+    sum += tex.sample(s, uv + float2(h.x, -h.y));
+    sum += tex.sample(s, uv - float2(h.x, -h.y));
+    float4 color = sum / 8.0;
+    if (b.vibrancy == 0.0 || color.a <= 0.0) { return color; }
+    color.rgb /= color.a;
+    const float Pr = 0.299, Pg = 0.587, Pb = 0.114;
+    const float ka = 0.93, kb = 0.11, kc = 0.66;
+    float darkness = 1.0 - b.vibrancy_darkness;
+    float3 hsl = rgb2hsl(color.rgb);
+    float perceived = double_circle_sigmoid(sqrt(color.r * color.r * Pr + color.g * color.g * Pg + color.b * color.b * Pb), 0.8 * darkness);
+    float b1 = kb * darkness;
+    float boost = hsl.y > 0.0
+        ? smoothstep(b1 - kc * 0.5, b1 + kc * 0.5, 1.0 - (pow(1.0 - hsl.y * cos(ka), 2.0) + pow(1.0 - perceived * sin(ka), 2.0)))
+        : 0.0;
+    float saturation = saturate(hsl.y + (boost * b.vibrancy) / b.passes);
+    return float4(hsl2rgb(float3(hsl.x, saturation, hsl.z)) * color.a, color.a);
+}
+
+// Upsample (blur2): `in.uv` samples the smaller source.
+fragment float4 blur_up(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Blur &b [[buffer(1)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float2 uv = in.uv;
+    float2 h = b.halfpixel * b.radius;
+    float4 sum = tex.sample(s, uv + float2(-h.x * 2.0, 0.0));
+    sum += tex.sample(s, uv + float2(-h.x, h.y)) * 2.0;
+    sum += tex.sample(s, uv + float2(0.0, h.y * 2.0));
+    sum += tex.sample(s, uv + float2(h.x, h.y)) * 2.0;
+    sum += tex.sample(s, uv + float2(h.x * 2.0, 0.0));
+    sum += tex.sample(s, uv + float2(h.x, -h.y)) * 2.0;
+    sum += tex.sample(s, uv + float2(0.0, -h.y * 2.0));
+    sum += tex.sample(s, uv + float2(-h.x, -h.y)) * 2.0;
+    return sum / 12.0;
+}
+
+static float hash(float2 p) {
+    float3 p3 = fract(float3(p.xyx) * 1689.1984);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fragment float4 blur_finish(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Blur &b [[buffer(1)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float4 c = tex.sample(s, in.uv);
+    c.rgb += (hash(in.uv) - 0.5) * b.noise * c.a;
+    c.rgb *= min(1.0, b.brightness);
+    return c;
+}
 "#;
+
+/// Matches `struct Shadow` in the shader.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ShadowQuad {
+    dst: [f32; 4],
+    rect: [f32; 4],
+    window: [f32; 4],
+    color: [f32; 4],
+    radius: f32,
+    range: f32,
+    power: f32,
+    window_radius: f32,
+}
+
+const _: () = assert!(std::mem::size_of::<ShadowQuad>() == 80);
+
+/// Matches `struct Blur` in the shader (float3 is 16 bytes, 16-aligned).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BlurParams {
+    halfpixel: [f32; 2],
+    radius: f32,
+    passes: f32,
+    vibrancy: f32,
+    vibrancy_darkness: f32,
+    contrast: f32,
+    brightness: f32,
+    noise: f32,
+    _pad: [f32; 7],
+}
+
+const _: () = assert!(std::mem::size_of::<BlurParams>() == 64);
 
 /// Matches `struct Quad` in the shader (16-byte aligned, 208 bytes).
 #[repr(C)]
@@ -157,7 +381,39 @@ pub struct Renderer {
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     border_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    shadow_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// prepare, down, up, finish.
+    blur_pipelines: [Retained<ProtocolObject<dyn MTLRenderPipelineState>>; 4],
+    blur_targets: RefCell<Option<BlurTargets>>,
     pub layer: Retained<CAMetalLayer>,
+}
+
+/// Textures for blurring, for one drawable size: the levels of the dual
+/// Kawase chain (level i is 1/2^i the size) and two results (the background
+/// blur, kept for the frame, and the latest live blur).
+struct BlurTargets {
+    size: (usize, usize),
+    levels: Vec<Texture>,
+    results: [Texture; 2],
+}
+
+/// Which blurred backdrop a translucent window shows through.
+#[derive(Clone, Copy, PartialEq)]
+enum Backdrop {
+    None,
+    /// The wallpaper and bottom layers, blurred once a frame (tiled windows).
+    Background,
+    /// Everything drawn so far, blurred now (floating windows over tiles).
+    Live,
+}
+
+/// How a window is decorated.
+struct Look<'a> {
+    decorated: bool,
+    clipped: bool,
+    focused: bool,
+    border: &'a Gradient,
+    backdrop: Backdrop,
 }
 
 impl Renderer {
@@ -170,16 +426,15 @@ impl Renderer {
             .newLibraryWithSource_options_error(&NSString::from_str(SHADERS), None)
             .unwrap_or_else(|err| panic!("compiling shaders: {}", err.localizedDescription()));
         let function = |name: &str| library.newFunctionWithName(&NSString::from_str(name)).expect(name);
-        let vertex = function("quad_vertex");
-        let pipeline_for = |fragment: &str| {
+        let pipeline_with = |vertex: &str, fragment: &str, blend: bool| {
             let desc = MTLRenderPipelineDescriptor::new();
-            desc.setVertexFunction(Some(&vertex));
+            desc.setVertexFunction(Some(&function(vertex)));
             desc.setFragmentFunction(Some(&function(fragment)));
             // SAFETY: index 0 always exists.
             let attachment = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
             attachment.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
             // Wayland buffers and our colours are premultiplied.
-            attachment.setBlendingEnabled(true);
+            attachment.setBlendingEnabled(blend);
             attachment.setSourceRGBBlendFactor(MTLBlendFactor::One);
             attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
             attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
@@ -188,15 +443,28 @@ impl Renderer {
                 .newRenderPipelineStateWithDescriptor_error(&desc)
                 .unwrap_or_else(|err| panic!("render pipeline {fragment}: {}", err.localizedDescription()))
         };
-        let pipeline = pipeline_for("quad_fragment");
-        let border_pipeline = pipeline_for("border_fragment");
+        let pipeline = pipeline_with("quad_vertex", "quad_fragment", true);
+        let border_pipeline = pipeline_with("quad_vertex", "border_fragment", true);
+        let shadow_pipeline = pipeline_with("shadow_vertex", "shadow_fragment", true);
+        let blur_pipelines = ["blur_prepare", "blur_down", "blur_up", "blur_finish"]
+            .map(|f| pipeline_with("quad_vertex", f, false));
 
         let layer = CAMetalLayer::new();
         layer.setDevice(Some(&device));
         layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-        layer.setFramebufferOnly(true);
+        // Blur reads back what's been drawn.
+        layer.setFramebufferOnly(false);
 
-        Renderer { device, queue, pipeline, border_pipeline, layer }
+        Renderer {
+            device,
+            queue,
+            pipeline,
+            border_pipeline,
+            shadow_pipeline,
+            blur_pipelines,
+            blur_targets: RefCell::new(None),
+            layer,
+        }
     }
 
     /// Draws every window and its popups, back to front.
@@ -224,16 +492,24 @@ impl Renderer {
         let settings = &state.config.settings;
         let mut frame = Frame {
             renderer: self,
-            encoder: &encoder,
+            encoder,
+            commands: &commands,
+            target: &target,
             scale,
             width: size.w,
             height: size.h,
+            logical: (state.output_size.w as f64, state.output_size.h as f64),
             round: None,
             xform: Xform::IDENTITY,
             alpha: 1.0,
+            background_blur: None,
         };
         use smithay::wayland::shell::wlr_layer::Layer;
         frame.layers(state, &[Layer::Background, Layer::Bottom]);
+        // The background blur, once, if anything on screen shows through to it.
+        if blur_on(settings) && frame_needs_blur(state) {
+            frame.background_blur = frame.blur(settings, 0);
+        }
         let transition = state.wm.transition.as_ref();
         // A workspace switch: the workspace being left, sliding or fading out.
         if let Some(tr) = transition {
@@ -245,23 +521,34 @@ impl Renderer {
                 }
                 for window in &windows {
                     let fullscreen = ws.fullscreen.as_ref() == Some(window);
-                    frame.window(settings, window, *tr.out_offset.value(), *tr.out_alpha.value(), fullscreen);
+                    let floating = ws.floating.contains(window);
+                    let focused = false;
+                    frame.window(settings, window, *tr.out_offset.value(), *tr.out_alpha.value(), fullscreen, floating, focused);
                 }
             }
         }
         let (offset, alpha) = transition.map(|t| (*t.in_offset.value(), *t.in_alpha.value())).unwrap_or(([0.0, 0.0], 1.0));
+        let focused = state.focused_window();
         for window in state.space.elements() {
-            frame.window(settings, window, offset, alpha, state.is_fullscreen(window));
+            let (fullscreen, floating) = (state.is_fullscreen(window), state.is_floating_here(window));
+            let is_focused = focused.as_ref() == Some(window);
+            frame.window(settings, window, offset, alpha, fullscreen, floating, is_focused);
         }
         for closing in &state.closing {
+            let translucent = closing.pieces.iter().any(|p| !p.opaque);
+            let look = Look {
+                decorated: closing.decorated,
+                clipped: closing.clipped,
+                focused: false,
+                border: &closing.border,
+                backdrop: if translucent { Backdrop::Background } else { Backdrop::None },
+            };
             frame.decorated(
                 settings,
                 *closing.rect.value(),
                 closing.anchor,
                 *closing.alpha.value(),
-                closing.decorated,
-                closing.clipped,
-                &closing.border,
+                &look,
                 |f| {
                     for p in &closing.pieces {
                         f.quad(&p.texture, p.opaque, p.pos, p.size, p.src, p.buffer);
@@ -272,7 +559,7 @@ impl Renderer {
         }
         frame.layers(state, state.upper_layers());
 
-        encoder.endEncoding();
+        frame.encoder.endEncoding();
         commands.presentDrawable(ProtocolObject::from_ref(&*drawable));
         commands.commit();
     }
@@ -345,6 +632,31 @@ impl Renderer {
         Some((texture, opaque))
     }
 
+    /// The blur textures for a drawable size, made (again) when it changes.
+    fn blur_targets(&self, size: (usize, usize)) -> Option<std::cell::Ref<'_, BlurTargets>> {
+        let stale = self.blur_targets.borrow().as_ref().is_none_or(|t| t.size != size);
+        if stale {
+            let make = |w: usize, h: usize| {
+                // SAFETY: plain descriptor construction.
+                let desc = unsafe {
+                    MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                        MTLPixelFormat::BGRA8Unorm,
+                        w.max(1),
+                        h.max(1),
+                        false,
+                    )
+                };
+                desc.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget);
+                desc.setStorageMode(objc2_metal::MTLStorageMode::Private);
+                self.device.newTextureWithDescriptor(&desc)
+            };
+            let levels = (0..=8).map(|i| make(size.0 >> i, size.1 >> i)).collect::<Option<Vec<_>>>()?;
+            let results = [make(size.0, size.1)?, make(size.0, size.1)?];
+            *self.blur_targets.borrow_mut() = Some(BlurTargets { size, levels, results });
+        }
+        std::cell::Ref::filter_map(self.blur_targets.borrow(), Option::as_ref).ok()
+    }
+
     fn new_texture(&self, width: usize, height: usize) -> Option<Texture> {
         // SAFETY: plain descriptor construction.
         let desc = unsafe {
@@ -362,10 +674,17 @@ impl Renderer {
 
 struct Frame<'a> {
     renderer: &'a Renderer,
-    encoder: &'a ProtocolObject<dyn MTLRenderCommandEncoder>,
+    /// The pass drawing into the drawable; ended and started again around blurs.
+    encoder: Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>,
+    commands: &'a ProtocolObject<dyn MTLCommandBuffer>,
+    target: &'a ProtocolObject<dyn MTLTexture>,
     scale: f64,
     width: f64,
     height: f64,
+    /// The output in logical points.
+    logical: (f64, f64),
+    /// The wallpaper and bottom layers blurred, if anything needs it.
+    background_blur: Option<Texture>,
     /// The window rectangle and corner radius (logical, on screen) the
     /// surfaces being drawn are rounded to.
     round: Option<(Rect, f64)>,
@@ -470,7 +789,17 @@ impl Frame<'_> {
 
     /// A live window where its animation has it, offset and faded by a
     /// workspace switch.
-    fn window(&mut self, settings: &Settings, window: &smithay::desktop::Window, offset: [f64; 2], ws_alpha: f64, fullscreen: bool) {
+    #[allow(clippy::too_many_arguments)]
+    fn window(
+        &mut self,
+        settings: &Settings,
+        window: &smithay::desktop::Window,
+        offset: [f64; 2],
+        ws_alpha: f64,
+        fullscreen: bool,
+        floating: bool,
+        focused: bool,
+    ) {
         let Some(toplevel) = window.toplevel() else { return };
         let Some((rect, goal, alpha, border)) =
             anim::with_anim(window, |a| (*a.rect.value(), *a.rect.goal(), *a.alpha.value(), a.border.value().clone()))
@@ -482,14 +811,20 @@ impl Frame<'_> {
         let geo = window.geometry().loc;
         let origin: Point<f64, Logical> = (goal.x - geo.x as f64, goal.y - geo.y as f64).into();
         let clipped = crate::wm::clip_of(window).is_some();
+        let backdrop = if !blur_on(settings) || surface_opaque(surface, window.geometry()) {
+            Backdrop::None
+        } else if floating && !settings.blur.xray {
+            Backdrop::Live
+        } else {
+            Backdrop::Background
+        };
+        let look = Look { decorated: !fullscreen, clipped, focused, border: &border, backdrop };
         self.decorated(
             settings,
             rect,
             goal,
             alpha * ws_alpha,
-            !fullscreen,
-            clipped,
-            &border,
+            &look,
             |f| f.draw_tree(surface, origin),
             |f| {
                 for (popup, offset) in PopupManager::popups_for_surface(surface) {
@@ -500,9 +835,9 @@ impl Frame<'_> {
         );
     }
 
-    /// A window's border and content in `rect` (logical, on screen), its
-    /// content laid out for `goal`: rounded, cut to the rectangle when it's a
-    /// tile (`clipped`), its popups after, uncut.
+    /// A window in `rect` (logical, on screen), its content laid out for
+    /// `goal`: shadow, blurred backdrop, border, then the content, rounded and
+    /// cut to the rectangle when it's a tile; its popups after, uncut.
     #[allow(clippy::too_many_arguments)]
     fn decorated(
         &mut self,
@@ -510,9 +845,7 @@ impl Frame<'_> {
         rect: Rect,
         goal: Rect,
         alpha: f64,
-        decorated: bool,
-        clipped: bool,
-        border: &Gradient,
+        look: &Look,
         content: impl FnOnce(&mut Self),
         popups: impl FnOnce(&mut Self),
     ) {
@@ -520,22 +853,181 @@ impl Frame<'_> {
             return;
         }
         self.alpha = alpha.min(1.0) as f32;
+        let b = settings.border_size.max(0) as f64;
+        let rounding = if look.decorated { settings.rounding.max(0) as f64 } else { 0.0 };
+        let shadow = &settings.shadow;
+        if look.decorated && shadow.enabled && shadow.range > 0.0 {
+            let color = if look.focused { shadow.color } else { shadow.color_inactive.unwrap_or(shadow.color) };
+            self.shadow(rect, b, rounding, shadow, color);
+        }
+        // What's behind, blurred, under a window that isn't opaque.
+        let backdrop = match look.backdrop {
+            Backdrop::None => None,
+            Backdrop::Background => self.background_blur.clone(),
+            Backdrop::Live => self.blur(settings, 1),
+        };
+        if let Some(texture) = backdrop {
+            self.backdrop(&texture, rect, rounding);
+        }
         // Border: a rounded ring just outside the window, in the space the
         // layout reserved for it.
-        let b = settings.border_size.max(0) as f64;
-        if decorated && b > 0.0 {
+        if look.decorated && b > 0.0 {
             let outer = Rect { x: rect.x - b, y: rect.y - b, w: rect.w + 2.0 * b, h: rect.h + 2.0 * b };
-            self.border(outer, settings.rounding as f64 + b, b, border);
+            self.border(outer, settings.rounding as f64 + b, b, look.border);
         }
         self.xform = Xform { base: (rect.x, rect.y), anchor: (goal.x, goal.y), scale: (rect.w / goal.w, rect.h / goal.h) };
-        self.round = (decorated && settings.rounding > 0).then_some((rect, settings.rounding as f64));
-        self.clip(clipped.then_some(rect));
+        self.round = (rounding > 0.0).then_some((rect, rounding));
+        self.clip(look.clipped.then_some(rect));
         content(self);
         self.clip(None);
         self.round = None;
         popups(self);
         self.xform = Xform::IDENTITY;
         self.alpha = 1.0;
+    }
+
+    /// A drop shadow for a window at `rect` with a `border`, as Hyprland's:
+    /// the box is the window and its border grown by the range, then scaled
+    /// from its centre and offset; it isn't drawn under the window itself.
+    fn shadow(&mut self, rect: Rect, border: f64, rounding: f64, cfg: &crate::config::ShadowConfig, color: [f32; 4]) {
+        let range = cfg.range;
+        let grow = border + range;
+        let full = Rect { x: rect.x - grow, y: rect.y - grow, w: rect.w + 2.0 * grow, h: rect.h + 2.0 * grow };
+        let (w, h) = (full.w * cfg.scale, full.h * cfg.scale);
+        let full = Rect {
+            x: full.x + (full.w - w) / 2.0 + cfg.offset.0,
+            y: full.y + (full.h - h) / 2.0 + cfg.offset.1,
+            w,
+            h,
+        };
+        if full.w < 1.0 || full.h < 1.0 {
+            return;
+        }
+        let s = self.scale;
+        let radius = if rounding > 0.0 { rounding + border } else { 0.0 };
+        let r = self.px(full);
+        let quad = ShadowQuad {
+            dst: self.ndc(r[0] as f64, r[1] as f64, r[2] as f64, r[3] as f64),
+            rect: r,
+            window: self.px(rect),
+            color: color.map(|c| c * self.alpha),
+            radius: (radius * s) as f32,
+            // Sharp: no falloff, a solid rounded box.
+            range: if cfg.sharp { 0.0 } else { (range * s) as f32 },
+            power: cfg.power as f32,
+            window_radius: (rounding.min(rect.w / 2.0).min(rect.h / 2.0) * s) as f32,
+        };
+        let bytes = NonNull::from(&quad).cast::<c_void>();
+        let len = std::mem::size_of::<ShadowQuad>();
+        // SAFETY: `quad` outlives the calls, which copy it.
+        unsafe {
+            self.encoder.setRenderPipelineState(&self.renderer.shadow_pipeline);
+            self.encoder.setVertexBytes_length_atIndex(bytes, len, 0);
+            self.encoder.setFragmentBytes_length_atIndex(bytes, len, 0);
+            self.encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::TriangleStrip, 0, 4);
+            self.encoder.setRenderPipelineState(&self.renderer.pipeline);
+        }
+    }
+
+    /// A blurred texture of the whole output, shown in `rect` (rounded).
+    fn backdrop(&mut self, texture: &ProtocolObject<dyn MTLTexture>, rect: Rect, rounding: f64) {
+        let r = self.px(rect);
+        let mut quad = Quad::empty();
+        quad.dst = self.ndc(r[0] as f64, r[1] as f64, r[2] as f64, r[3] as f64);
+        quad.src = [
+            (rect.x / self.logical.0) as f32,
+            (rect.y / self.logical.1) as f32,
+            (rect.w / self.logical.0) as f32,
+            (rect.h / self.logical.1) as f32,
+        ];
+        quad.opaque = 1;
+        quad.alpha = self.alpha;
+        quad.rect = r;
+        quad.radius = (rounding.min(rect.w / 2.0).min(rect.h / 2.0) * self.scale) as f32;
+        let bytes = NonNull::from(&quad).cast::<c_void>();
+        let len = std::mem::size_of::<Quad>();
+        // SAFETY: `quad` outlives the calls, which copy it.
+        unsafe {
+            self.encoder.setVertexBytes_length_atIndex(bytes, len, 0);
+            self.encoder.setFragmentBytes_length_atIndex(bytes, len, 0);
+            self.encoder.setFragmentTexture_atIndex(Some(texture), 0);
+            self.encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::TriangleStrip, 0, 4);
+        }
+    }
+
+    /// Blurs what's been drawn so far into result texture `slot`: ends the
+    /// current pass, runs Hyprland's passes (prepare, `passes` downsamples,
+    /// as many upsamples, finish) and starts drawing again where it was.
+    fn blur(&mut self, settings: &Settings, slot: usize) -> Option<Texture> {
+        let cfg = &settings.blur;
+        let passes = cfg.passes.clamp(1, 8) as usize;
+        let size = (self.target.width(), self.target.height());
+        let targets = self.renderer.blur_targets(size)?;
+        self.encoder.endEncoding();
+        let params = |halfpixel: [f32; 2]| BlurParams {
+            halfpixel,
+            radius: cfg.size as f32,
+            passes: passes as f32,
+            vibrancy: cfg.vibrancy as f32,
+            vibrancy_darkness: cfg.vibrancy_darkness as f32,
+            contrast: cfg.contrast as f32,
+            brightness: cfg.brightness as f32,
+            noise: cfg.noise as f32,
+            _pad: [0.0; 7],
+        };
+        let inv = |t: &ProtocolObject<dyn MTLTexture>, k: f32| [1.0 / (t.width() as f32 * k), 1.0 / (t.height() as f32 * k)];
+        let [prepare, down, up, finish] = &self.renderer.blur_pipelines;
+        let mut ok = self.blur_pass(prepare, self.target, &targets.levels[0], params([0.0; 2]));
+        for i in 1..=passes {
+            ok &= self.blur_pass(down, &targets.levels[i - 1], &targets.levels[i], params(inv(&targets.levels[i - 1], 1.0)));
+        }
+        for i in (0..passes).rev() {
+            ok &= self.blur_pass(up, &targets.levels[i + 1], &targets.levels[i], params(inv(&targets.levels[i + 1], 4.0)));
+        }
+        ok &= self.blur_pass(finish, &targets.levels[0], &targets.results[slot], params([0.0; 2]));
+
+        // Carry on drawing into the drawable, keeping what's there.
+        let pass = MTLRenderPassDescriptor::new();
+        // SAFETY: index 0 always exists.
+        let color = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
+        color.setTexture(Some(self.target));
+        color.setLoadAction(MTLLoadAction::Load);
+        color.setStoreAction(MTLStoreAction::Store);
+        let encoder = self.commands.renderCommandEncoderWithDescriptor(&pass)?;
+        encoder.setRenderPipelineState(&self.renderer.pipeline);
+        self.encoder = encoder;
+        ok.then(|| targets.results[slot].clone())
+    }
+
+    /// One full-screen blur pass from `src` into `dst`.
+    fn blur_pass(
+        &self,
+        pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+        src: &ProtocolObject<dyn MTLTexture>,
+        dst: &ProtocolObject<dyn MTLTexture>,
+        params: BlurParams,
+    ) -> bool {
+        let pass = MTLRenderPassDescriptor::new();
+        // SAFETY: index 0 always exists.
+        let color = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
+        color.setTexture(Some(dst));
+        color.setLoadAction(MTLLoadAction::DontCare);
+        color.setStoreAction(MTLStoreAction::Store);
+        let Some(encoder) = self.commands.renderCommandEncoderWithDescriptor(&pass) else { return false };
+        let mut quad = Quad::empty();
+        quad.dst = [-1.0, 1.0, 2.0, -2.0];
+        let qbytes = NonNull::from(&quad).cast::<c_void>();
+        let pbytes = NonNull::from(&params).cast::<c_void>();
+        // SAFETY: `quad` and `params` outlive the calls, which copy them.
+        unsafe {
+            encoder.setRenderPipelineState(pipeline);
+            encoder.setVertexBytes_length_atIndex(qbytes, std::mem::size_of::<Quad>(), 0);
+            encoder.setFragmentBytes_length_atIndex(pbytes, std::mem::size_of::<BlurParams>(), 1);
+            encoder.setFragmentTexture_atIndex(Some(src), 0);
+            encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::TriangleStrip, 0, 4);
+        }
+        encoder.endEncoding();
+        true
     }
 
     /// A rounded border ring filling `outer` (logical), `width` thick.
@@ -645,5 +1137,56 @@ impl Frame<'_> {
             self.encoder.setFragmentTexture_atIndex(Some(texture), 0);
             self.encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::TriangleStrip, 0, 4);
         }
+    }
+}
+
+fn blur_on(settings: &Settings) -> bool {
+    settings.blur.enabled && settings.blur.passes > 0 && settings.blur.size > 0.0
+}
+
+/// Whether a surface covers its window geometry with opaque pixels: an
+/// XRGB buffer, or an opaque region over the whole geometry. Blur is
+/// invisible behind those and skipped.
+fn surface_opaque(surface: &WlSurface, geometry: Rectangle<i32, Logical>) -> bool {
+    smithay::wayland::compositor::with_states(surface, |states| {
+        let xrgb = states
+            .data_map
+            .get::<RefCell<Option<SurfaceTexture>>>()
+            .and_then(|c| c.borrow().as_ref().map(|t| t.opaque))
+            .unwrap_or(false);
+        if xrgb {
+            return true;
+        }
+        let mut attrs = states.cached_state.get::<smithay::wayland::compositor::SurfaceAttributes>();
+        let Some(region) = attrs.current().opaque_region.clone() else { return false };
+        use smithay::wayland::compositor::RectangleKind;
+        region.rects.iter().all(|(kind, _)| matches!(kind, RectangleKind::Add))
+            && region.rects.iter().any(|(_, r)| r.contains_rect(geometry))
+    })
+}
+
+/// Whether any window this frame draws shows the background blur.
+fn frame_needs_blur(state: &State) -> bool {
+    let translucent = |w: &smithay::desktop::Window| {
+        w.toplevel().is_some_and(|t| !surface_opaque(t.wl_surface(), w.geometry()))
+    };
+    let leaving = state.wm.transition.as_ref().and_then(|t| state.wm.workspaces.get(&t.from)).map(|ws| ws.windows());
+    state.space.elements().any(translucent)
+        || leaving.is_some_and(|ws| ws.iter().any(translucent))
+        || state.closing.iter().any(|c| c.pieces.iter().any(|p| !p.opaque))
+}
+
+#[cfg(test)]
+mod tests {
+    /// The shaders compile only at runtime: make every pipeline here instead
+    /// of finding out on screen.
+    #[test]
+    fn shaders_compile_and_pipelines_build() {
+        use objc2_metal::MTLTexture;
+        let renderer = super::Renderer::new();
+        assert_eq!(renderer.blur_pipelines.len(), 4);
+        let targets = renderer.blur_targets((300, 200)).expect("blur textures");
+        assert_eq!(targets.levels[1].width(), 150);
+        assert_eq!(targets.levels[8].height(), 1);
     }
 }

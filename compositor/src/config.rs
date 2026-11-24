@@ -150,6 +150,38 @@ pub struct DwindleConfig {
     pub use_active_for_splits: bool,
 }
 
+/// `decoration.shadow`, with Hyprland's defaults.
+#[derive(Clone, Debug)]
+pub struct ShadowConfig {
+    pub enabled: bool,
+    /// Logical points.
+    pub range: f64,
+    /// Falloff exponent, 1 to 4.
+    pub power: f64,
+    pub sharp: bool,
+    /// Premultiplied.
+    pub color: Rgba,
+    pub color_inactive: Option<Rgba>,
+    pub offset: (f64, f64),
+    pub scale: f64,
+}
+
+/// `decoration.blur`, with Hyprland's defaults.
+#[derive(Clone, Debug)]
+pub struct BlurConfig {
+    pub enabled: bool,
+    /// Sample distance, in pixels.
+    pub size: f64,
+    pub passes: u32,
+    /// Floating windows blur only the background (wallpaper, bottom layers), not the tiles under them.
+    pub xray: bool,
+    pub noise: f64,
+    pub contrast: f64,
+    pub brightness: f64,
+    pub vibrancy: f64,
+    pub vibrancy_darkness: f64,
+}
+
 /// An `hl.curve`.
 #[derive(Clone, Debug)]
 pub enum Curve {
@@ -176,6 +208,8 @@ pub struct Settings {
     pub active_border: Gradient,
     pub inactive_border: Gradient,
     pub rounding: i32,
+    pub shadow: ShadowConfig,
+    pub blur: BlurConfig,
     pub layout: String,
     /// `general.gaps_workspaces`: space between workspaces as they slide.
     pub workspace_gap: f64,
@@ -205,6 +239,42 @@ impl Settings {
             inactive_border: parse_gradient(flat, "general.col.inactive_border")
                 .unwrap_or(Gradient::solid([0.267, 0.267, 0.267, 1.0])),
             rounding: num("decoration.rounding", 0.0) as i32,
+            shadow: {
+                let color = |k: &str| parse_gradient(flat, k).and_then(|g| g.colors.first().copied());
+                let offset = match flat.get("decoration.shadow.offset") {
+                    Some(ConfigValue::List(v)) if v.len() == 2 => {
+                        (v[0].as_f64().unwrap_or(0.0), v[1].as_f64().unwrap_or(0.0))
+                    }
+                    Some(ConfigValue::Str(s)) => {
+                        let n: Vec<f64> = s.split([' ', ',']).filter_map(|p| p.parse().ok()).collect();
+                        (n.first().copied().unwrap_or(0.0), n.get(1).copied().unwrap_or(0.0))
+                    }
+                    _ => (num("decoration.shadow.offset.x", 0.0), num("decoration.shadow.offset.y", 0.0)),
+                };
+                ShadowConfig {
+                    enabled: num("decoration.shadow.enabled", 1.0) != 0.0,
+                    range: num("decoration.shadow.range", 4.0).clamp(0.0, 100.0),
+                    power: num("decoration.shadow.render_power", 3.0).clamp(1.0, 4.0),
+                    sharp: num("decoration.shadow.sharp", 0.0) != 0.0,
+                    // 0xee1a1a1a, premultiplied.
+                    color: color("decoration.shadow.color")
+                        .unwrap_or([0.102 * 0.933, 0.102 * 0.933, 0.102 * 0.933, 0.933]),
+                    color_inactive: color("decoration.shadow.color_inactive"),
+                    offset,
+                    scale: num("decoration.shadow.scale", 1.0).clamp(0.0, 1.0),
+                }
+            },
+            blur: BlurConfig {
+                enabled: num("decoration.blur.enabled", 1.0) != 0.0,
+                size: num("decoration.blur.size", 8.0).clamp(0.0, 100.0),
+                passes: num("decoration.blur.passes", 1.0).clamp(0.0, 8.0) as u32,
+                xray: num("decoration.blur.xray", 0.0) != 0.0,
+                noise: num("decoration.blur.noise", 0.0117).clamp(0.0, 1.0),
+                contrast: num("decoration.blur.contrast", 0.8916).clamp(0.0, 2.0),
+                brightness: num("decoration.blur.brightness", 1.0).clamp(0.0, 2.0),
+                vibrancy: num("decoration.blur.vibrancy", 0.1696).clamp(0.0, 1.0),
+                vibrancy_darkness: num("decoration.blur.vibrancy_darkness", 0.0).clamp(0.0, 1.0),
+            },
             layout: string("general.layout", "dwindle"),
             workspace_gap: num("general.gaps_workspaces", 0.0),
             dwindle: DwindleConfig {
@@ -787,6 +857,12 @@ mod tests {
         assert_eq!(c.settings.active_border.colors.len(), 2);
         assert_eq!(c.settings.active_border.angle, 45.0);
         assert_eq!(c.settings.inactive_border.colors.len(), 1);
+        let (shadow, blur) = (&c.settings.shadow, &c.settings.blur);
+        assert!(shadow.enabled && blur.enabled);
+        assert_eq!((shadow.range, shadow.power), (4.0, 3.0));
+        assert!((shadow.color[3] - 0xee as f32 / 255.0).abs() < 1e-6);
+        assert_eq!((blur.size, blur.passes), (3.0, 1));
+        assert!((blur.vibrancy - 0.1696).abs() < 1e-9);
         // Its bind functions call hl.get_active_window(); they must run, not error.
         let hit = c
             .find_bind(crate::binds::Mods { logo: true, ..Default::default() }, crate::binds::parse_chord("h").unwrap().keysym)
