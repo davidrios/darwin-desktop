@@ -46,6 +46,8 @@ pub enum WorkspaceTarget {
     /// `+1`, `-1`, `e+1`, `e-1`: relative, `existing` skipping empty ones.
     Relative { delta: i32, existing: bool },
     Previous,
+    /// `special:<name>` (`special` alone is `special:special`).
+    Special(String),
 }
 
 impl WorkspaceTarget {
@@ -53,6 +55,12 @@ impl WorkspaceTarget {
         let s = s.trim();
         if s == "previous" {
             return Some(WorkspaceTarget::Previous);
+        }
+        if s == "special" {
+            return Some(WorkspaceTarget::Special("special".into()));
+        }
+        if let Some(name) = s.strip_prefix("special:").filter(|n| !n.is_empty()) {
+            return Some(WorkspaceTarget::Special(name.into()));
         }
         if let Some(rest) = s.strip_prefix('e').or_else(|| s.strip_prefix('m')) {
             if let Ok(delta) = rest.parse::<i32>() {
@@ -78,6 +86,8 @@ pub enum Action {
     FocusWorkspace(WorkspaceTarget),
     MoveWindow(Direction),
     MoveToWorkspace { target: WorkspaceTarget, follow: bool },
+    /// `hl.dsp.workspace.toggle_special(name)`: show or hide a special workspace.
+    ToggleSpecial(String),
     /// `hl.dsp.window.drag()` on a mouse bind: move the window under the pointer.
     MouseDrag,
     /// `hl.dsp.window.resize()` on a mouse bind: resize it from the nearest corner.
@@ -189,6 +199,7 @@ mod tests {
         assert_eq!(WorkspaceTarget::parse("3"), Some(WorkspaceTarget::Id(3)));
         assert_eq!(WorkspaceTarget::parse("e+1"), Some(WorkspaceTarget::Relative { delta: 1, existing: true }));
         assert_eq!(WorkspaceTarget::parse("-1"), Some(WorkspaceTarget::Relative { delta: -1, existing: false }));
-        assert_eq!(WorkspaceTarget::parse("special:magic"), None);
+        assert_eq!(WorkspaceTarget::parse("special:magic"), Some(WorkspaceTarget::Special("magic".into())));
+        assert_eq!(WorkspaceTarget::parse("special"), Some(WorkspaceTarget::Special("special".into())));
     }
 }

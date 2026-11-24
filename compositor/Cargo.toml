@@ -20,6 +20,7 @@ block2 = "=0.6.2"
 mlua = { version = "=0.12.2", features = ["lua55", "vendored"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+regex = { version = "=1.13.2", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 
 # Patched sources (patches/README.md): run scripts/prepare-third-party.sh first.
 [patch.crates-io]

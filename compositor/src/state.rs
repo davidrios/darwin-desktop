@@ -299,13 +299,23 @@ impl CompositorHandler for State {
                 window.toplevel().unwrap().send_configure();
             }
         } else if let Some(window) = self.find_window(surface).filter(|w| self.is_floating_here(w)) {
-            // A floating window is centred once its size is known.
+            // A floating window is centred (or put where a `move` rule says)
+            // once its size is known, if it's on screen.
             window.user_data().insert_if_missing(|| Cell::new(false));
             let placed = window.user_data().get::<Cell<bool>>().unwrap();
             let size = window.geometry().size;
-            if !placed.get() && size.w > 0 && size.h > 0 {
+            let on_screen = self.space.element_location(&window).is_some();
+            if !placed.get() && on_screen && size.w > 0 && size.h > 0 {
                 placed.set(true);
-                let loc = ((self.output_size.w - size.w) / 2, (self.output_size.h - size.h) / 2);
+                let moved = window
+                    .user_data()
+                    .get::<crate::rules::Placement>()
+                    .and_then(|p| p.move_to.clone())
+                    .and_then(|m| crate::rules::eval_pair(&m, &self.rule_vars((size.w as f64, size.h as f64))));
+                let loc = match moved {
+                    Some((x, y)) => (x.round() as i32, y.round() as i32),
+                    None => ((self.output_size.w - size.w) / 2, (self.output_size.h - size.h) / 2),
+                };
                 self.space.map_element(window.clone(), loc, true);
             }
         }
@@ -354,6 +364,10 @@ impl XdgShellHandler for State {
         _output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
     ) {
         if let Some(window) = self.find_window(surface.wl_surface()) {
+            // `suppress_event = "fullscreen"`: ignored.
+            if self.rule_effects(&window).suppress.iter().any(|e| e == "fullscreen") {
+                return;
+            }
             self.set_fullscreen(&window, true);
         }
     }

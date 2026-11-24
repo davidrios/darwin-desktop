@@ -629,6 +629,24 @@ fn workspace_side(style: &str, incoming: bool, mut left: bool, output: (f64, f64
     }
 }
 
+/// A special workspace fading in over the active one, or out.
+pub struct SpecialAnim {
+    pub id: i32,
+    pub showing: bool,
+    pub alpha: Animated<f64>,
+    pub offset: Animated<[f64; 2]>,
+}
+
+impl SpecialAnim {
+    fn tick(&mut self, now: Instant) -> bool {
+        self.alpha.tick(now) | self.offset.tick(now)
+    }
+
+    fn active(&self) -> bool {
+        self.alpha.active() || self.offset.active()
+    }
+}
+
 // ---- the per-frame step ----
 
 impl State {
@@ -671,7 +689,8 @@ impl State {
                 })
             });
             let floating = self.is_floating_here(&window);
-            let dragging = self.dragging(&window);
+            // Being dragged, or a `no_anim` rule: follow without animating.
+            let dragging = self.dragging(&window) || self.rule_effects(&window).no_anim;
             let t = &self.timings;
             window.user_data().insert_if_missing(|| AnimSlot::new(None));
             let mut slot = window.user_data().get::<AnimSlot>().unwrap().borrow_mut();
@@ -688,7 +707,7 @@ impl State {
                         last_frame: frame,
                     };
                     let fresh = window.user_data().get::<Fresh>().is_some_and(|f| f.0.replace(false));
-                    if fresh {
+                    if fresh && !dragging {
                         let timing = t.get("windowsIn");
                         a.rect.animate_from(styled(&timing.style, goal, output), goal, timing, now);
                         a.alpha.animate_from(0.0, 1.0, t.get("fadeIn"), now);
@@ -736,6 +755,25 @@ impl State {
             }
         }
 
+        // A special workspace fading: its windows animate too while it hides.
+        if let Some(sa) = &mut self.wm.special_anim {
+            busy |= sa.tick(now);
+            if !sa.showing {
+                let hiding = self.wm.workspaces.get(&sa.id).map(|ws| ws.windows()).unwrap_or_default();
+                for w in hiding {
+                    if let Some(slot) = w.user_data().get::<AnimSlot>() {
+                        if let Some(a) = slot.borrow_mut().as_mut() {
+                            a.last_frame = frame;
+                            busy |= a.tick(now);
+                        }
+                    }
+                }
+            }
+            if !sa.active() {
+                self.wm.special_anim = None;
+            }
+        }
+
         for c in &mut self.closing {
             busy |= c.rect.tick(now) | c.alpha.tick(now);
         }
@@ -772,6 +810,25 @@ impl State {
             decorated: !self.is_fullscreen(window),
             clipped: crate::wm::clip_of(window).is_some(),
         });
+        self.needs_redraw = true;
+    }
+
+    /// A special workspace appearing or going away: the `specialWorkspaceIn`
+    /// / `Out` style's offset, and always a fade (as Hyprland).
+    pub fn animate_special(&mut self, id: i32, showing: bool) {
+        let leaf = if showing { "specialWorkspaceIn" } else { "specialWorkspaceOut" };
+        let timing = self.timings.get(leaf).clone();
+        let output = (self.output_size.w as f64, self.output_size.h as f64);
+        let gap = self.config.settings.workspace_gap;
+        let (_, _, o0, o1) = workspace_side(&timing.style.to_lowercase(), showing, true, output, gap);
+        let (a0, a1) = if showing { (0.0, 1.0) } else { (1.0, 0.0) };
+        let now = Instant::now();
+        let mut alpha = Animated::new(a0);
+        alpha.set(a1, &timing, now);
+        let mut offset = Animated::new(o0);
+        offset.set(o1, &timing, now);
+        let sa = SpecialAnim { id, showing, alpha, offset };
+        self.wm.special_anim = sa.active().then_some(sa);
         self.needs_redraw = true;
     }
 

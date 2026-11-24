@@ -68,9 +68,7 @@ impl Keys {
             }
         });
         if let Some(Some(hit)) = hit {
-            for action in state.config.run_bind(hit) {
-                state.run_action(action);
-            }
+            state.run_bind(hit);
         }
     }
 
@@ -183,9 +181,7 @@ pub fn pointer_button(state: &mut State, button: u32, pressed: bool, time: Input
             let taken = match state.config.bind_action(&hit) {
                 Some(action) => state.mouse_bind(button, action),
                 None => {
-                    for action in state.config.run_bind(hit) {
-                        state.run_action(action);
-                    }
+                    state.run_bind(hit);
                     true
                 }
             };
@@ -235,9 +231,7 @@ pub fn scroll(state: &mut State, event: &NSEvent) {
             None
         };
         if let Some(hit) = key.and_then(|k| state.config.find_mouse_bind(mods, k)) {
-            for action in state.config.run_bind(hit) {
-                state.run_action(action);
-            }
+            state.run_bind(hit);
             return;
         }
     }

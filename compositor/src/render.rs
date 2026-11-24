@@ -409,11 +409,16 @@ enum Backdrop {
 
 /// How a window is decorated.
 struct Look<'a> {
+    /// Border and shadow drawn.
     decorated: bool,
     clipped: bool,
     focused: bool,
     border: &'a Gradient,
     backdrop: Backdrop,
+    /// Corner radius and border width (logical): the config's, or a rule's.
+    rounding: f64,
+    border_size: f64,
+    shadow: bool,
 }
 
 impl Renderer {
@@ -523,16 +528,43 @@ impl Renderer {
                     let fullscreen = ws.fullscreen.as_ref() == Some(window);
                     let floating = ws.floating.contains(window);
                     let focused = false;
-                    frame.window(settings, window, *tr.out_offset.value(), *tr.out_alpha.value(), fullscreen, floating, focused);
+                    frame.window(settings, window, *tr.out_offset.value(), *tr.out_alpha.value(), fullscreen, floating, focused, &state.rule_effects(window));
                 }
             }
         }
         let (offset, alpha) = transition.map(|t| (*t.in_offset.value(), *t.in_alpha.value())).unwrap_or(([0.0, 0.0], 1.0));
         let focused = state.focused_window();
-        for window in state.space.elements() {
+        let special = state.wm.special;
+        let in_special =
+            |w: &smithay::desktop::Window| special.is_some_and(|s| state.wm.workspaces.get(&s).is_some_and(|ws| ws.contains(w)));
+        for window in state.space.elements().filter(|w| !in_special(w)) {
             let (fullscreen, floating) = (state.is_fullscreen(window), state.is_floating_here(window));
             let is_focused = focused.as_ref() == Some(window);
-            frame.window(settings, window, offset, alpha, fullscreen, floating, is_focused);
+            frame.window(settings, window, offset, alpha, fullscreen, floating, is_focused, &state.rule_effects(window));
+        }
+        // A special workspace over the active one, which dims under it.
+        let special_anim = state.wm.special_anim.as_ref();
+        let hiding = special_anim.filter(|a| !a.showing);
+        if special.is_some() || hiding.is_some() {
+            let (s_alpha, s_offset) = special_anim.map(|a| (*a.alpha.value(), *a.offset.value())).unwrap_or((1.0, [0.0, 0.0]));
+            let dim = (settings.dim_special * s_alpha) as f32;
+            if dim > 0.0 {
+                let (w, h) = frame.logical;
+                frame.fill(Rect::new(0.0, 0.0, w, h), [0.0, 0.0, 0.0, dim]);
+            }
+            if special.is_some() {
+                for window in state.space.elements().filter(|w| in_special(w)) {
+                    let (fullscreen, floating) = (state.is_fullscreen(window), state.is_floating_here(window));
+                    let is_focused = focused.as_ref() == Some(window);
+                    frame.window(settings, window, s_offset, s_alpha, fullscreen, floating, is_focused, &state.rule_effects(window));
+                }
+            } else if let Some(ws) = hiding.and_then(|a| state.wm.workspaces.get(&a.id)) {
+                for window in ws.windows() {
+                    let fullscreen = ws.fullscreen.as_ref() == Some(&window);
+                    let floating = ws.floating.contains(&window);
+                    frame.window(settings, &window, s_offset, s_alpha, fullscreen, floating, false, &state.rule_effects(&window));
+                }
+            }
         }
         for closing in &state.closing {
             let translucent = closing.pieces.iter().any(|p| !p.opaque);
@@ -542,6 +574,9 @@ impl Renderer {
                 focused: false,
                 border: &closing.border,
                 backdrop: if translucent { Backdrop::Background } else { Backdrop::None },
+                rounding: if closing.decorated { settings.rounding.max(0) as f64 } else { 0.0 },
+                border_size: settings.border_size.max(0) as f64,
+                shadow: true,
             };
             frame.decorated(
                 settings,
@@ -799,6 +834,7 @@ impl Frame<'_> {
         fullscreen: bool,
         floating: bool,
         focused: bool,
+        rules: &crate::rules::Effects,
     ) {
         let Some(toplevel) = window.toplevel() else { return };
         let Some((rect, goal, alpha, border)) =
@@ -811,19 +847,29 @@ impl Frame<'_> {
         let geo = window.geometry().loc;
         let origin: Point<f64, Logical> = (goal.x - geo.x as f64, goal.y - geo.y as f64).into();
         let clipped = crate::wm::clip_of(window).is_some();
-        let backdrop = if !blur_on(settings) || surface_opaque(surface, window.geometry()) {
+        let backdrop = if !blur_on(settings) || rules.no_blur || surface_opaque(surface, window.geometry()) {
             Backdrop::None
         } else if floating && !settings.blur.xray {
             Backdrop::Live
         } else {
             Backdrop::Background
         };
-        let look = Look { decorated: !fullscreen, clipped, focused, border: &border, backdrop };
+        let look = Look {
+            decorated: !fullscreen && rules.decorate != Some(false),
+            clipped,
+            focused,
+            border: &border,
+            backdrop,
+            rounding: if fullscreen { 0.0 } else { rules.rounding.unwrap_or(settings.rounding as f64).max(0.0) },
+            border_size: rules.border_size.unwrap_or(settings.border_size as f64).max(0.0),
+            shadow: !rules.no_shadow,
+        };
+        let opacity = rules.opacity.map(|(active, inactive)| if focused { active } else { inactive }).unwrap_or(1.0);
         self.decorated(
             settings,
             rect,
             goal,
-            alpha * ws_alpha,
+            alpha * ws_alpha * opacity.clamp(0.0, 1.0),
             &look,
             |f| f.draw_tree(surface, origin),
             |f| {
@@ -853,10 +899,10 @@ impl Frame<'_> {
             return;
         }
         self.alpha = alpha.min(1.0) as f32;
-        let b = settings.border_size.max(0) as f64;
-        let rounding = if look.decorated { settings.rounding.max(0) as f64 } else { 0.0 };
+        let b = look.border_size;
+        let rounding = look.rounding;
         let shadow = &settings.shadow;
-        if look.decorated && shadow.enabled && shadow.range > 0.0 {
+        if look.decorated && look.shadow && shadow.enabled && shadow.range > 0.0 {
             let color = if look.focused { shadow.color } else { shadow.color_inactive.unwrap_or(shadow.color) };
             self.shadow(rect, b, rounding, shadow, color);
         }
@@ -873,7 +919,7 @@ impl Frame<'_> {
         // layout reserved for it.
         if look.decorated && b > 0.0 {
             let outer = Rect { x: rect.x - b, y: rect.y - b, w: rect.w + 2.0 * b, h: rect.h + 2.0 * b };
-            self.border(outer, settings.rounding as f64 + b, b, look.border);
+            self.border(outer, rounding + b, b, look.border);
         }
         self.xform = Xform { base: (rect.x, rect.y), anchor: (goal.x, goal.y), scale: (rect.w / goal.w, rect.h / goal.h) };
         self.round = (rounding > 0.0).then_some((rect, rounding));
@@ -916,6 +962,31 @@ impl Frame<'_> {
             range: if cfg.sharp { 0.0 } else { (range * s) as f32 },
             power: cfg.power as f32,
             window_radius: (rounding.min(rect.w / 2.0).min(rect.h / 2.0) * s) as f32,
+        };
+        let bytes = NonNull::from(&quad).cast::<c_void>();
+        let len = std::mem::size_of::<ShadowQuad>();
+        // SAFETY: `quad` outlives the calls, which copy it.
+        unsafe {
+            self.encoder.setRenderPipelineState(&self.renderer.shadow_pipeline);
+            self.encoder.setVertexBytes_length_atIndex(bytes, len, 0);
+            self.encoder.setFragmentBytes_length_atIndex(bytes, len, 0);
+            self.encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::TriangleStrip, 0, 4);
+            self.encoder.setRenderPipelineState(&self.renderer.pipeline);
+        }
+    }
+
+    /// A solid rectangle (logical), `color` premultiplied.
+    fn fill(&mut self, rect: Rect, color: [f32; 4]) {
+        let r = self.px(rect);
+        let quad = ShadowQuad {
+            dst: self.ndc(r[0] as f64, r[1] as f64, r[2] as f64, r[3] as f64),
+            rect: r,
+            window: [0.0; 4],
+            color,
+            radius: 0.0,
+            range: 0.0,
+            power: 1.0,
+            window_radius: 0.0,
         };
         let bytes = NonNull::from(&quad).cast::<c_void>();
         let len = std::mem::size_of::<ShadowQuad>();

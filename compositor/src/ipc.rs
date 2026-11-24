@@ -18,7 +18,7 @@
 //! and `$TMPDIR` is long. Window addresses are per-window counters.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     io::{Read, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
@@ -143,7 +143,7 @@ fn window_id(window: &Window) -> u64 {
 }
 
 /// `app_id` and title.
-fn class_title(window: &Window) -> (String, String) {
+pub fn class_title(window: &Window) -> (String, String) {
     let Some(surface) = window.wl_surface() else { return Default::default() };
     with_states(&surface, |states| {
         states
@@ -162,14 +162,18 @@ fn class_title(window: &Window) -> (String, String) {
 #[derive(Clone, Default, PartialEq)]
 struct WindowInfo {
     workspace: i32,
+    workspace_name: String,
     class: String,
     title: String,
 }
 
 #[derive(Clone, Default, PartialEq)]
 struct Snapshot {
-    workspaces: BTreeSet<i32>,
+    /// Id to name.
+    workspaces: BTreeMap<i32, String>,
     active: i32,
+    /// The special workspace shown, by name.
+    special: Option<String>,
     windows: BTreeMap<u64, WindowInfo>,
     focused: Option<u64>,
     fullscreen: bool,
@@ -179,22 +183,25 @@ struct Snapshot {
 /// Hyprland's event data escapes nothing; commas in titles stay as they are.
 fn events(old: &Snapshot, new: &Snapshot) -> Vec<String> {
     let mut out = Vec::new();
-    for id in new.workspaces.difference(&old.workspaces) {
-        out.push(format!("createworkspace>>{id}"));
-        out.push(format!("createworkspacev2>>{id},{id}"));
+    for (id, name) in new.workspaces.iter().filter(|(id, _)| !old.workspaces.contains_key(id)) {
+        out.push(format!("createworkspace>>{name}"));
+        out.push(format!("createworkspacev2>>{id},{name}"));
     }
     if new.active != old.active {
         let id = new.active;
         out.push(format!("workspace>>{id}"));
         out.push(format!("workspacev2>>{id},{id}"));
     }
+    if new.special != old.special {
+        out.push(format!("activespecial>>{},{MONITOR}", new.special.as_deref().unwrap_or("")));
+    }
     for (addr, w) in &new.windows {
         match old.windows.get(addr) {
-            None => out.push(format!("openwindow>>{addr:x},{},{},{}", w.workspace, w.class, w.title)),
+            None => out.push(format!("openwindow>>{addr:x},{},{},{}", w.workspace_name, w.class, w.title)),
             Some(before) => {
                 if before.workspace != w.workspace {
-                    out.push(format!("movewindow>>{addr:x},{}", w.workspace));
-                    out.push(format!("movewindowv2>>{addr:x},{},{}", w.workspace, w.workspace));
+                    out.push(format!("movewindow>>{addr:x},{}", w.workspace_name));
+                    out.push(format!("movewindowv2>>{addr:x},{},{}", w.workspace, w.workspace_name));
                 }
                 if before.title != w.title {
                     out.push(format!("windowtitle>>{addr:x}"));
@@ -221,9 +228,9 @@ fn events(old: &Snapshot, new: &Snapshot) -> Vec<String> {
     if new.layout != old.layout && !old.layout.is_empty() {
         out.push(format!("activelayout>>darwin-keyboard,{}", new.layout));
     }
-    for id in old.workspaces.difference(&new.workspaces) {
-        out.push(format!("destroyworkspace>>{id}"));
-        out.push(format!("destroyworkspacev2>>{id},{id}"));
+    for (id, name) in old.workspaces.iter().filter(|(id, _)| !new.workspaces.contains_key(id)) {
+        out.push(format!("destroyworkspace>>{name}"));
+        out.push(format!("destroyworkspacev2>>{id},{name}"));
     }
     out
 }
@@ -249,9 +256,9 @@ fn js(s: &str) -> String {
 }
 
 impl State {
-    /// Workspaces as Hyprland lists them: the active one and any with windows.
+    /// Workspaces as Hyprland lists them: the ones on screen and any with windows.
     fn ipc_workspaces(&self) -> Vec<i32> {
-        self.wm.workspaces.iter().filter(|(id, ws)| **id == self.wm.active || !ws.is_empty()).map(|(id, _)| *id).collect()
+        self.wm.workspaces.iter().filter(|(id, ws)| self.wm.visible(**id) || !ws.is_empty()).map(|(id, _)| *id).collect()
     }
 
     fn ipc_snapshot(&mut self) -> Snapshot {
@@ -259,12 +266,14 @@ impl State {
         for (id, ws) in &self.wm.workspaces {
             for w in ws.windows() {
                 let (class, title) = class_title(&w);
-                windows.insert(window_id(&w), WindowInfo { workspace: *id, class, title });
+                let workspace_name = self.wm.workspace_name(*id);
+                windows.insert(window_id(&w), WindowInfo { workspace: *id, workspace_name, class, title });
             }
         }
         Snapshot {
-            workspaces: self.ipc_workspaces().into_iter().collect(),
+            workspaces: self.ipc_workspaces().into_iter().map(|id| (id, self.wm.workspace_name(id))).collect(),
             active: self.wm.active,
+            special: self.wm.special.map(|id| self.wm.workspace_name(id)),
             windows,
             focused: self.focused_window().map(|w| window_id(&w)),
             fullscreen: self.fullscreen_active(),
@@ -300,7 +309,7 @@ impl State {
         };
         format!(
             r#"{{"id":{id},"name":{name},"monitor":{MONITOR:?},"monitorID":0,"windows":{n},"hasfullscreen":{fs},"lastwindow":{addr},"lastwindowtitle":{title},"ispersistent":false}}"#,
-            name = js(&id.to_string()),
+            name = js(&self.wm.workspace_name(id)),
             n = windows.len(),
             fs = ws.is_some_and(|ws| ws.fullscreen.is_some()),
             addr = js(&addr),
@@ -334,7 +343,7 @@ impl State {
             y = rect.y.round() as i32,
             w = rect.w.round() as i32,
             h = rect.h.round() as i32,
-            ws_name = js(&ws_id.to_string()),
+            ws_name = js(&self.wm.workspace_name(ws_id)),
             class = js(&class),
             title = js(&title),
             fs = if fullscreen { 2 } else { 0 },
@@ -350,14 +359,71 @@ impl State {
         let (pw, ph) = mode.map(|m| (m.size.w, m.size.h)).unwrap_or((w, h));
         let refresh = mode.map(|m| m.refresh as f64 / 1000.0).unwrap_or(60.0);
         format!(
-            r#"{{"id":0,"name":{MONITOR:?},"description":"Apple window","make":"Apple","model":"window","serial":"","width":{pw},"height":{ph},"physicalWidth":0,"physicalHeight":0,"refreshRate":{refresh:.5},"x":0,"y":0,"activeWorkspace":{{"id":{a},"name":{an}}},"specialWorkspace":{{"id":0,"name":""}},"reserved":[{r0},{r1},{r2},{r3}],"scale":{scale:.2},"transform":0,"focused":true,"dpmsStatus":true,"vrr":false,"solitary":"0","activelyTearing":false,"directScanoutTo":"0","disabled":false,"currentFormat":"XRGB8888","mirrorOf":"none","availableModes":[]}}"#,
+            r#"{{"id":0,"name":{MONITOR:?},"description":"Apple window","make":"Apple","model":"window","serial":"","width":{pw},"height":{ph},"physicalWidth":0,"physicalHeight":0,"refreshRate":{refresh:.5},"x":0,"y":0,"activeWorkspace":{{"id":{a},"name":{an}}},"specialWorkspace":{{"id":{sp},"name":{spn}}},"reserved":[{r0},{r1},{r2},{r3}],"scale":{scale:.2},"transform":0,"focused":true,"dpmsStatus":true,"vrr":false,"solitary":"0","activelyTearing":false,"directScanoutTo":"0","disabled":false,"currentFormat":"XRGB8888","mirrorOf":"none","availableModes":[]}}"#,
             a = self.wm.active,
             an = js(&self.wm.active.to_string()),
+            sp = self.wm.special.unwrap_or(0),
+            spn = js(&self.wm.special.map(|id| self.wm.workspace_name(id)).unwrap_or_default()),
             r0 = reserved[0],
             r1 = reserved[1],
             r2 = reserved[2],
             r3 = reserved[3],
         )
+    }
+
+    /// What Lua's `hl.get_*` queries see (`config::World`).
+    pub fn lua_world(&self) -> crate::config::World {
+        use crate::config::{WindowView, WorkspaceView, World};
+        let mut windows = Vec::new();
+        let mut workspaces = Vec::new();
+        for (id, ws) in &self.wm.workspaces {
+            for w in ws.windows() {
+                let (class, title) = class_title(&w);
+                let rect = crate::anim::with_anim(&w, |a| *a.rect.goal()).unwrap_or_default();
+                let pid = w
+                    .wl_surface()
+                    .and_then(|s| self.display_handle.get_client(s.id()).ok())
+                    .and_then(|c| c.get_credentials(&self.display_handle).ok())
+                    .map(|c| c.pid as i64)
+                    .unwrap_or(-1);
+                windows.push(WindowView {
+                    address: format!("0x{:x}", window_id(&w)),
+                    class,
+                    title,
+                    workspace: *id,
+                    floating: ws.floating.contains(&w),
+                    fullscreen: ws.fullscreen.as_ref() == Some(&w),
+                    at: (rect.x, rect.y),
+                    size: (rect.w, rect.h),
+                    pid,
+                    focus_history_id: ws.focus_history_id(&w),
+                });
+            }
+            if self.wm.visible(*id) || !ws.is_empty() {
+                workspaces.push(WorkspaceView {
+                    id: *id,
+                    name: self.wm.workspace_name(*id),
+                    windows: ws.windows().len(),
+                    has_fullscreen: ws.fullscreen.is_some(),
+                });
+            }
+        }
+        World {
+            windows,
+            workspaces,
+            active: self.wm.active,
+            special: self.wm.special,
+            focused: self.focused_window().map(|w| format!("0x{:x}", window_id(&w))),
+            cursor: (self.pointer_location.x, self.pointer_location.y),
+        }
+    }
+
+    /// Runs a bind with the current state visible to its Lua (`hl.get_*`).
+    pub fn run_bind(&mut self, hit: crate::config::BindHit) {
+        self.config.set_world(self.lua_world());
+        for action in self.config.run_bind(hit) {
+            self.run_action(action);
+        }
     }
 
     /// Answers one request on `.socket.sock`.
@@ -427,6 +493,7 @@ impl State {
     /// `dispatcher args` pair.
     fn ipc_dispatch(&mut self, args: &str) -> String {
         let actions = if args.starts_with("hl.") {
+            self.config.set_world(self.lua_world());
             match self.config.eval_dispatch(args) {
                 Ok(actions) => actions,
                 Err(err) => return format!("error: {err}"),
@@ -439,6 +506,9 @@ impl State {
                 "movetoworkspace" => workspace().map(|target| Action::MoveToWorkspace { target, follow: true }),
                 "movetoworkspacesilent" => workspace().map(|target| Action::MoveToWorkspace { target, follow: false }),
                 "exec" => Some(Action::Exec(arg.to_string())),
+                "togglespecialworkspace" => {
+                    Some(Action::ToggleSpecial(if arg.is_empty() { "special".into() } else { arg.to_string() }))
+                }
                 "killactive" => Some(Action::Close),
                 "togglefloating" => Some(Action::ToggleFloat),
                 "fullscreen" => Some(Action::Fullscreen),
@@ -465,12 +535,12 @@ mod tests {
     #[test]
     fn workspace_switch_events() {
         let mut a = Snapshot { active: 1, ..Default::default() };
-        a.workspaces.insert(1);
-        a.windows.insert(0x10, WindowInfo { workspace: 1, class: "vte".into(), title: "sh".into() });
+        a.workspaces.insert(1, "1".into());
+        a.windows.insert(0x10, WindowInfo { workspace: 1, workspace_name: "1".into(), class: "vte".into(), title: "sh".into() });
         a.focused = Some(0x10);
         let mut b = Snapshot { active: 2, ..Default::default() };
-        b.workspaces.insert(1);
-        b.workspaces.insert(2);
+        b.workspaces.insert(1, "1".into());
+        b.workspaces.insert(2, "2".into());
         b.windows = a.windows.clone();
         let ev = events(&a, &b);
         assert_eq!(
@@ -490,13 +560,26 @@ mod tests {
     fn window_events() {
         let a = Snapshot { active: 1, ..Default::default() };
         let mut b = a.clone();
-        b.windows.insert(0xab, WindowInfo { workspace: 1, class: "vte".into(), title: "sh".into() });
+        b.windows.insert(0xab, WindowInfo { workspace: 1, workspace_name: "1".into(), class: "vte".into(), title: "sh".into() });
         b.focused = Some(0xab);
         assert_eq!(events(&a, &b), ["openwindow>>ab,1,vte,sh", "activewindow>>vte,sh", "activewindowv2>>ab"]);
         let mut c = b.clone();
         c.windows.get_mut(&0xab).unwrap().title = "vim".into();
         assert_eq!(events(&b, &c), ["windowtitle>>ab", "windowtitlev2>>ab,vim", "activewindow>>vte,vim", "activewindowv2>>ab"]);
         assert_eq!(events(&c, &a)[0], "closewindow>>ab");
+    }
+
+    #[test]
+    fn special_workspace_events() {
+        let a = Snapshot { active: 1, ..Default::default() };
+        let mut b = a.clone();
+        b.workspaces.insert(-98, "special:magic".into());
+        b.special = Some("special:magic".into());
+        assert_eq!(
+            events(&a, &b),
+            ["createworkspace>>special:magic", "createworkspacev2>>-98,special:magic", "activespecial>>special:magic,darwin-0"]
+        );
+        assert_eq!(events(&b, &a)[0], "activespecial>>,darwin-0");
     }
 
     #[test]

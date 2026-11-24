@@ -57,7 +57,7 @@ impl Workspace {
         self.tiled.is_empty() && self.floating.is_empty()
     }
 
-    fn contains(&self, w: &Window) -> bool {
+    pub fn contains(&self, w: &Window) -> bool {
         self.tiled.contains(w) || self.floating.contains(w)
     }
 
@@ -88,13 +88,61 @@ pub struct Wm {
     pub pending: Vec<Window>,
     /// A workspace switch animating.
     pub transition: Option<crate::anim::Transition>,
+    /// The special workspace shown over the active one, if any. Special
+    /// workspaces have negative ids, as in Hyprland.
+    pub special: Option<i32>,
+    /// Special workspaces' names (without `special:`), by id.
+    special_names: BTreeMap<i32, String>,
+    /// A special workspace fading in or out.
+    pub special_anim: Option<crate::anim::SpecialAnim>,
 }
 
 impl Default for Wm {
     fn default() -> Self {
         let mut workspaces = BTreeMap::new();
         workspaces.insert(1, Workspace::default());
-        Wm { workspaces, active: 1, previous: 1, pending: Vec::new(), transition: None }
+        Wm {
+            workspaces,
+            active: 1,
+            previous: 1,
+            pending: Vec::new(),
+            transition: None,
+            special: None,
+            special_names: BTreeMap::new(),
+            special_anim: None,
+        }
+    }
+}
+
+impl Wm {
+    /// A workspace's name: its number, or `special:<name>`.
+    pub fn workspace_name(&self, id: i32) -> String {
+        if id < 0 {
+            format!("special:{}", self.special_names.get(&id).map(String::as_str).unwrap_or("special"))
+        } else {
+            id.to_string()
+        }
+    }
+
+    /// The workspace that has focus: the special one when it's shown.
+    pub fn focused_id(&self) -> i32 {
+        self.special.unwrap_or(self.active)
+    }
+
+    /// Whether a workspace is on screen (the active one, or the special one over it).
+    pub fn visible(&self, id: i32) -> bool {
+        id == self.active || Some(id) == self.special
+    }
+
+    /// The id of the special workspace with this name, made up if new
+    /// (Hyprland numbers them from -98 down).
+    fn special_id(&mut self, name: &str) -> i32 {
+        if let Some((id, _)) = self.special_names.iter().find(|(_, n)| *n == name) {
+            return *id;
+        }
+        let id = self.special_names.keys().next().map(|lowest| lowest - 1).unwrap_or(-98);
+        self.special_names.insert(id, name.to_string());
+        id
     }
 }
 
@@ -114,9 +162,12 @@ impl State {
             .or_else(|| self.wm.workspaces.values().flat_map(|ws| ws.windows()).find(|w| matches(w)))
     }
 
-    /// Whether a window is the active workspace's fullscreen window.
+    /// Whether a window is the fullscreen window of a workspace on screen.
     pub fn is_fullscreen(&self, w: &Window) -> bool {
-        self.wm.workspaces.get(&self.wm.active).is_some_and(|ws| ws.fullscreen.as_ref() == Some(w))
+        self.wm
+            .workspaces
+            .iter()
+            .any(|(id, ws)| self.wm.visible(*id) && ws.fullscreen.as_ref() == Some(w))
     }
 
     /// Fullscreen a window on its workspace (one per workspace), or undo it.
@@ -130,22 +181,24 @@ impl State {
         } else {
             return;
         }
-        if id == self.wm.active {
+        if self.wm.visible(id) {
             self.relayout();
         }
     }
 
-    /// Whether a window floats on the active workspace.
+    /// Whether a window floats (on whichever workspace it's on).
     pub fn is_floating_here(&self, w: &Window) -> bool {
-        self.active_ws_ref().floating.contains(w)
+        self.wm.workspaces.values().any(|ws| ws.floating.contains(w))
     }
 
-    fn workspace_of(&self, w: &Window) -> Option<i32> {
+    pub fn workspace_of(&self, w: &Window) -> Option<i32> {
         self.wm.workspaces.iter().find(|(_, ws)| ws.contains(w)).map(|(id, _)| *id)
     }
 
+    /// The workspace with focus (the special one when shown): new windows
+    /// open there, and focus/move/split act there.
     fn active_ws(&mut self) -> &mut Workspace {
-        self.wm.workspaces.entry(self.wm.active).or_default()
+        self.wm.workspaces.entry(self.wm.focused_id()).or_default()
     }
 
     pub fn focused_window(&self) -> Option<Window> {
@@ -191,6 +244,63 @@ impl State {
             min.w > 0 && min == max
         };
         let float = toplevel.parent().is_some() || fixed_size;
+        // Window rules, matched as the window opens (rules.rs).
+        let rules = {
+            let mut facts = self.rule_facts(&window);
+            facts.floating = float;
+            facts.focused = false;
+            self.evaluate_rules(&facts)
+        };
+        let float = rules.float.unwrap_or(float);
+        let here = self.wm.focused_id();
+        let (target, silent) = match rules.workspace.as_deref() {
+            Some(spec) => {
+                let mut words = spec.split_whitespace();
+                let target = words.next().and_then(WorkspaceTarget::parse);
+                let silent = words.any(|w| w == "silent");
+                (target.and_then(|t| self.resolve_workspace(&t)), silent)
+            }
+            None => (None, false),
+        };
+        let ws_id = target.unwrap_or(here);
+        if float {
+            if let Some(size) = rules.size.as_deref().and_then(|s| crate::rules::eval_pair(s, &self.rule_vars((0.0, 0.0)))) {
+                configure(&window, Some((size.0.max(1.0) as i32, size.1.max(1.0) as i32).into()), false, false);
+            }
+            if rules.move_to.is_some() {
+                window.user_data().insert_if_missing(|| crate::rules::Placement { move_to: rules.move_to.clone() });
+            }
+        }
+        if ws_id != here {
+            // A rule's workspace: opens there, not where the focus is.
+            let area = self.work_area();
+            let cfg = self.config.settings.dwindle.clone();
+            let ws = self.wm.workspaces.entry(ws_id).or_default();
+            if float {
+                ws.floating.push(window.clone());
+            } else {
+                let opening_on = ws.last_focused();
+                ws.tiled.insert(window.clone(), opening_on.as_ref(), None, area, &cfg);
+            }
+            ws.history.push(window.clone());
+            if rules.fullscreen {
+                ws.fullscreen = Some(window.clone());
+            }
+            if silent {
+                if self.wm.visible(ws_id) {
+                    self.relayout();
+                }
+            } else if ws_id < 0 {
+                self.hide_special(false);
+                self.show_special(ws_id);
+            } else {
+                self.switch_workspace(ws_id);
+            }
+            if !silent && !rules.no_initial_focus && !rules.no_focus {
+                self.focus(Some(window), SERIAL_COUNTER.next_serial());
+            }
+            return;
+        }
         let pointer = (self.pointer_location.x, self.pointer_location.y);
         let area = self.work_area();
         let opening_on = if self.config.settings.dwindle.use_active_for_splits {
@@ -214,8 +324,13 @@ impl State {
                 ws.floating.push(window.clone());
             }
         }
+        if rules.fullscreen {
+            ws.fullscreen = Some(window.clone());
+        }
         self.relayout();
-        self.focus(Some(window), SERIAL_COUNTER.next_serial());
+        if !rules.no_initial_focus && !rules.no_focus {
+            self.focus(Some(window), SERIAL_COUNTER.next_serial());
+        }
     }
 
     /// How to split for a new window: `Some(None)` dwindle's own choice,
@@ -254,35 +369,53 @@ impl State {
     }
 
     fn active_ws_ref(&self) -> &Workspace {
-        &self.wm.workspaces[&self.wm.active]
+        self.wm.workspaces.get(&self.wm.focused_id()).unwrap_or(&self.wm.workspaces[&self.wm.active])
     }
 
     /// A toplevel went away.
     pub fn unmanage(&mut self, window: &Window) {
         self.wm.pending.retain(|w| w != window);
-        let was_active = self.workspace_of(window) == Some(self.wm.active);
-        if was_active {
+        let was_visible = self.workspace_of(window).is_some_and(|id| self.wm.visible(id));
+        if was_visible {
             self.animate_close(window);
         }
         for ws in self.wm.workspaces.values_mut() {
             ws.forget(window);
         }
         self.space.unmap_elem(window);
-        if was_active {
-            self.relayout();
-            let next = self.active_ws_ref().last_focused();
-            self.focus(next, SERIAL_COUNTER.next_serial());
+        if was_visible {
+            if !self.hide_special_if_empty() {
+                self.relayout();
+                let next = self.active_ws_ref().last_focused();
+                self.focus(next, SERIAL_COUNTER.next_serial());
+            }
         }
     }
 
-    /// Lay out and map the active workspace.
+    /// Lay out and map the active workspace, and the special one over it.
     pub fn relayout(&mut self) {
+        self.layout_workspace(self.wm.active);
+        if let Some(special) = self.wm.special {
+            self.layout_workspace(special);
+            // Above the active workspace's windows, its floating ones on top.
+            let ws = &self.wm.workspaces[&special];
+            let mut order: Vec<Window> = ws.tiled.tiles().into_iter().map(|(w, _)| w).collect();
+            order.extend(ws.floating.iter().cloned());
+            order.extend(ws.fullscreen.iter().cloned());
+            for w in order {
+                self.space.raise_element(&w, false);
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Lay out and map one workspace's windows.
+    fn layout_workspace(&mut self, id: i32) {
         let area = self.work_area();
         let cfg = self.config.settings.dwindle.clone();
         let output = Rectangle::from_size(self.output_size);
-        let active = self.wm.active;
         let (tiles, floating, fullscreen) = {
-            let ws = self.wm.workspaces.entry(active).or_default();
+            let ws = self.wm.workspaces.entry(id).or_default();
             ws.tiled.recalc(area, &cfg);
             (ws.tiled.tiles(), ws.floating.clone(), ws.fullscreen.clone())
         };
@@ -315,15 +448,72 @@ impl State {
             self.space.map_element(window, (0, 0), true);
         }
         // Floating windows stay above the tiles.
-        let floating: Vec<Window> = self.active_ws_ref().floating.clone();
+        let floating: Vec<Window> = self.wm.workspaces[&id].floating.clone();
         for w in floating {
             self.space.raise_element(&w, false);
         }
-        self.needs_redraw = true;
+    }
+
+    /// Show or hide a special workspace (`toggle_special`): shown over the
+    /// active workspace, which dims; another special one showing is hidden.
+    pub fn toggle_special(&mut self, name: &str) {
+        let id = self.wm.special_id(name);
+        if self.wm.special == Some(id) {
+            self.hide_special(true);
+            return;
+        }
+        if self.wm.special.is_some() {
+            self.hide_special(false);
+        }
+        self.show_special(id);
+    }
+
+    fn show_special(&mut self, id: i32) {
+        self.wm.workspaces.entry(id).or_default();
+        self.wm.special = Some(id);
+        self.relayout();
+        self.animate_special(id, true);
+        let next = self.wm.workspaces[&id].last_focused();
+        if next.is_some() {
+            self.focus(next, SERIAL_COUNTER.next_serial());
+        }
+        tracing::debug!("special workspace {} shown", self.wm.workspace_name(id));
+    }
+
+    /// Hide the special workspace shown, fading it out if `animate`.
+    pub fn hide_special(&mut self, animate: bool) {
+        let Some(id) = self.wm.special.take() else { return };
+        for w in self.wm.workspaces.get(&id).map(Workspace::windows).unwrap_or_default() {
+            self.space.unmap_elem(&w);
+        }
+        if self.wm.workspaces.get(&id).is_some_and(Workspace::is_empty) {
+            self.wm.workspaces.remove(&id);
+        }
+        if animate {
+            self.animate_special(id, false);
+        } else {
+            self.wm.special_anim = None;
+        }
+        self.relayout();
+        let next = self.active_ws_ref().last_focused();
+        self.focus(next, SERIAL_COUNTER.next_serial());
+    }
+
+    /// Hyprland closes a special workspace whose last window left. True if it did.
+    fn hide_special_if_empty(&mut self) -> bool {
+        let empty = self.wm.special.is_some_and(|id| self.wm.workspaces.get(&id).is_none_or(Workspace::is_empty));
+        if empty {
+            self.hide_special(true);
+        }
+        empty
     }
 
     /// Keyboard focus to a window (or nothing), with activation and history.
     pub fn focus(&mut self, window: Option<Window>, serial: smithay::utils::Serial) {
+        // A `no_focus` rule: the window never takes the focus.
+        if window.as_ref().is_some_and(|w| self.rule_effects(w).no_focus) {
+            return;
+        }
         if let Some(w) = &window {
             if let Some(id) = self.workspace_of(w) {
                 let ws = self.wm.workspaces.get_mut(&id).unwrap();
@@ -362,12 +552,14 @@ impl State {
         if id == self.wm.active || id < 1 {
             return;
         }
-        for w in self.active_ws_ref().windows() {
+        // Changing workspace closes the special one.
+        self.hide_special(false);
+        for w in self.wm.workspaces[&self.wm.active].windows() {
             self.space.unmap_elem(&w);
         }
         self.wm.previous = self.wm.active;
         // Drop the workspace we leave if it's empty (as Hyprland does).
-        if self.active_ws_ref().is_empty() {
+        if self.wm.workspaces[&self.wm.active].is_empty() {
             self.wm.workspaces.remove(&self.wm.active);
         }
         let from = self.wm.active;
@@ -381,14 +573,20 @@ impl State {
         tracing::debug!("workspace {id}");
     }
 
-    fn resolve_workspace(&self, target: &WorkspaceTarget) -> Option<i32> {
+    fn resolve_workspace(&mut self, target: &WorkspaceTarget) -> Option<i32> {
         match target {
             WorkspaceTarget::Id(id) => Some(*id),
             WorkspaceTarget::Previous => Some(self.wm.previous),
+            WorkspaceTarget::Special(name) => Some(self.wm.special_id(name)),
             WorkspaceTarget::Relative { delta, existing: false } => Some((self.wm.active + delta).max(1)),
             WorkspaceTarget::Relative { delta, existing: true } => {
-                let ids: Vec<i32> =
-                    self.wm.workspaces.iter().filter(|(id, ws)| !ws.is_empty() || **id == self.wm.active).map(|(id, _)| *id).collect();
+                let ids: Vec<i32> = self
+                    .wm
+                    .workspaces
+                    .iter()
+                    .filter(|(id, ws)| **id > 0 && (!ws.is_empty() || **id == self.wm.active))
+                    .map(|(id, _)| *id)
+                    .collect();
                 let pos = ids.iter().position(|id| *id == self.wm.active)? as i32;
                 let n = ids.len() as i32;
                 Some(ids[((pos + delta) % n + n) as usize % n as usize])
@@ -415,9 +613,24 @@ impl State {
         }
         dest.history.push(window.clone());
         if follow {
-            self.switch_workspace(target);
+            if target < 0 {
+                // Into a special workspace: show it.
+                if self.wm.special != Some(target) {
+                    self.hide_special(false);
+                    self.show_special(target);
+                } else {
+                    self.relayout();
+                }
+            } else if target == self.wm.active {
+                // Out of the special workspace onto the one under it.
+                if !self.hide_special_if_empty() {
+                    self.relayout();
+                }
+            } else {
+                self.switch_workspace(target);
+            }
             self.focus(Some(window), SERIAL_COUNTER.next_serial());
-        } else {
+        } else if !self.hide_special_if_empty() {
             self.relayout();
             let next = self.active_ws_ref().last_focused();
             self.focus(next, SERIAL_COUNTER.next_serial());
@@ -484,6 +697,9 @@ impl State {
                 if let Some(t) = focused.as_ref().and_then(Window::toplevel) {
                     t.send_close();
                 }
+            }
+            Action::FocusWorkspace(WorkspaceTarget::Special(name)) | Action::ToggleSpecial(name) => {
+                self.toggle_special(&name)
             }
             Action::FocusWorkspace(target) => {
                 if let Some(id) = self.resolve_workspace(&target) {

@@ -14,13 +14,17 @@ Shadows and blur (step 4) are written; the shaders compile and every pipeline bu
 
 Mouse binds and the trackpad workspace swipe (step 5) are written and unit-tested (the resize and chord parts); seen working by hand (2026-11-24).
 
-Still to do in M2: groups, special workspaces, window rules.
+Special workspaces and Lua query objects (step 6) are written and unit-tested (the owner's scratchpad bind runs against them); seen working by hand (2026-11-24).
+
+Window rules (step 7) are written and unit-tested against the owner's rules; seen working by hand (2026-11-24).
+
+Still to do in M2: groups.
 
 ## Config: Hyprland's Lua config
 
 `~/.config/hypr/hyprland.lua` (or `--config`), Hyprland 0.55+'s Lua API, run in an embedded Lua 5.5 (`mlua`, vendored). When there's no file, a built-in default (`compositor/src/default-config.lua`) applies. SUPER is Command; ALT is left Option.
 
-Implemented (`compositor/src/config.rs`): `hl.config` (general gaps/border/layout, decoration rounding, dwindle options, input follow_mouse, animations enabled), `hl.bind` with the dispatchers below or a Lua function, `hl.exec_cmd`, `hl.dispatch`, `hl.env`, `hl.on("hyprland.start")`, `hl.curve` (bezier and spring), `hl.animation`, `require` next to the config. `hl.get_active_window` / `hl.get_active_workspace` return nil for now. Everything else in `hl` (window rules, monitors, gestures, devices, permissions, layer rules, custom layouts) loads, warns once and does nothing.
+Implemented (`compositor/src/config.rs`): `hl.config` (general gaps/border/layout, decoration rounding, dwindle options, input follow_mouse, animations enabled), `hl.bind` with the dispatchers below or a Lua function, `hl.exec_cmd`, `hl.dispatch`, `hl.env`, `hl.on("hyprland.start")`, `hl.curve` (bezier and spring), `hl.animation`, `require` next to the config. `hl.get_*` queries return window and workspace tables (below). `hl.window_rule` and `hl.gesture` are below. Everything else in `hl` (monitors, devices, permissions, layer rules, workspace rules, custom layouts) loads, warns once and does nothing.
 
 Dispatchers: `exec_cmd`, `exit`, `layout("togglesplit")`, `focus({direction})`, `focus({workspace})` (numbers, `+1`/`-1`, `e+1`/`e-1`, `previous`), `window.close`/`kill`, `window.float`, `window.fullscreen`, `window.move({direction})` (swap), `window.move({workspace, follow})`. Others warn when used.
 
@@ -120,3 +124,19 @@ Trackpad scrolling (`input.rs`): macOS's precise deltas are pixels, while Waylan
 macOS still runs its own three/four-finger swipes (Spaces, Mission Control) from the same touches: with a three-finger `hl.gesture`, set those to four fingers (or off) in System Settings > Trackpad.
 
 Only the workspace action; other `hl.gesture` actions warn once.
+
+## Special workspaces
+
+`compositor/src/wm.rs`. `special:<name>` workspaces (`special` alone is `special:special`) get negative ids from -98 down, as Hyprland. `hl.dsp.workspace.toggle_special(name)` (and `focus({ workspace = "special:x" })`, IPC `togglespecialworkspace`) shows one over the active workspace or hides it; showing another hides the first. While shown it's the focused workspace: new windows open in it, and focus, move, split and float act in it; its windows are tiled in the same work area and drawn above, the workspace under it dimmed by `decoration.dim_special` (default 0.2). It fades in and out (always a fade, plus the `specialWorkspaceIn`/`Out` style's offset, as Hyprland). Moving a window to it with `follow` shows it; moving its last window out (or closing it) hides it; switching workspace hides it at once. The IPC lists it as `special:<name>` with `activespecial` events and the monitor's `specialWorkspace`.
+
+## Lua queries
+
+`hl.get_active_window`, `get_windows`, `get_window(address)`, `get_active_workspace`, `get_active_special_workspace`, `get_workspaces`, `get_workspace(id or name)`, `get_cursor_pos` return plain tables with Hyprland's field names (`address`, `class`, `title`, `workspace = { id, name, special, ... }`, `floating`, `fullscreen`, `at`, `size`, `pid`, `focus_history_id`, `active`, ...). Lua can't reach the live state, so before a bind or an IPC Lua dispatch runs, the compositor hands the config a snapshot (`config::World`); dispatches queue and run after the function returns, so a function sees the state from before its own dispatches. `window.group` is nil until groups exist.
+
+## Window rules
+
+`compositor/src/rules.rs`, `hl.window_rule({ name, match = { ... }, effects })`, returning a handle with `set_enabled`. A rule applies when all its `match` properties do; strings are regexes matching the whole value (as Hyprland's RE2 `FullMatch`; `negative:` inverts); later rules override earlier ones for the same effect. Matched properties: `class`, `title`, `initial_class`, `initial_title` (the current values: no initial ones kept yet), `float`, `fullscreen`, `focus`, `modal` (has a parent), `workspace` (name as text), `xwayland`/`pin` (always false). A rule with any other property never matches (warned once).
+
+When a window opens (its first commit, title and app id known): `float`/`tile`, `size` and `move` (floating: "x y" expressions with `N%`, `monitor_w/h`, `window_w/h`, `cursor_x/y`, `+ - * /`, parentheses; `move` is applied once the window's size is known), `center` (the default anyway), `workspace` ("3", "special:magic", "... silent" to leave the focus where it is), `fullscreen`, `no_initial_focus`. While it's open (evaluated again whenever the window's class, title, floating, fullscreen, focus or workspace change): `no_focus` (never takes the keyboard), `suppress_event` ("fullscreen" ignores the client's request; "maximize" has nothing to suppress, there's no maximized state), `rounding`, `border_size` (drawn only: the layout still reserves the configured border), `opacity` ("active [inactive]"), `no_shadow`, `no_blur`, `no_anim`, `decorate` (false: no border or shadow). Other effects warn once.
+
+Not yet: workspace selectors in `match` (`w[tv1]`, `f[1]`), `hl.workspace_rule`, `hl.layer_rule`, tags, `initial_*` kept from the first commit, `monitor`, `pin`, `group`, `animation`, `border_color`, `min_size`/`max_size`.

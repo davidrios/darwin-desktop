@@ -21,6 +21,7 @@ mod layers;
 mod layout;
 mod mouse;
 mod render;
+mod rules;
 mod state;
 mod wm;
 

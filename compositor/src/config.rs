@@ -4,8 +4,9 @@
 //! The `hl` API is implemented as far as the compositor has the features:
 //! `hl.config`, `hl.bind` with the `hl.dsp.*` dispatchers in `binds::Action`,
 //! `hl.exec_cmd`, `hl.dispatch`, `hl.env`, `hl.on("hyprland.start")`,
-//! `hl.curve`, `hl.animation`, `hl.gesture` (workspace swipes). Everything
-//! else in `hl` (window rules, monitors, ...) is accepted, warned about once, and ignored, so a
+//! `hl.curve`, `hl.animation`, `hl.gesture` (workspace swipes),
+//! `hl.window_rule` (`rules.rs`). Everything else in `hl` (layer rules,
+//! monitors, ...) is accepted, warned about once, and ignored, so a
 //! full Hyprland config still loads. SUPER is Command.
 
 use std::{
@@ -150,6 +151,42 @@ pub struct DwindleConfig {
     pub use_active_for_splits: bool,
 }
 
+/// What `hl.get_*` queries see: the compositor's state when a bind (or an
+/// IPC dispatch) started running. Lua can't reach the live state, so the
+/// compositor hands it this snapshot first (`Config::set_world`).
+#[derive(Clone, Debug, Default)]
+pub struct World {
+    pub windows: Vec<WindowView>,
+    pub workspaces: Vec<WorkspaceView>,
+    pub active: i32,
+    pub special: Option<i32>,
+    /// The focused window's address.
+    pub focused: Option<String>,
+    pub cursor: (f64, f64),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WindowView {
+    pub address: String,
+    pub class: String,
+    pub title: String,
+    pub workspace: i32,
+    pub floating: bool,
+    pub fullscreen: bool,
+    pub at: (f64, f64),
+    pub size: (f64, f64),
+    pub pid: i64,
+    pub focus_history_id: i32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WorkspaceView {
+    pub id: i32,
+    pub name: String,
+    pub windows: usize,
+    pub has_fullscreen: bool,
+}
+
 /// An `hl.gesture`: a trackpad swipe with `fingers` fingers along
 /// `direction` runs `action` (only "workspace" is supported).
 #[derive(Clone, Debug)]
@@ -233,6 +270,8 @@ pub struct Settings {
     pub active_border: Gradient,
     pub inactive_border: Gradient,
     pub rounding: i32,
+    /// `decoration.dim_special`: how much the workspace under a special one darkens.
+    pub dim_special: f64,
     pub shadow: ShadowConfig,
     pub blur: BlurConfig,
     pub layout: String,
@@ -268,6 +307,7 @@ impl Settings {
             inactive_border: parse_gradient(flat, "general.col.inactive_border")
                 .unwrap_or(Gradient::solid([0.267, 0.267, 0.267, 1.0])),
             rounding: num("decoration.rounding", 0.0) as i32,
+            dim_special: num("decoration.dim_special", 0.2).clamp(0.0, 1.0),
             shadow: {
                 let color = |k: &str| parse_gradient(flat, k).and_then(|g| g.colors.first().copied());
                 let offset = match flat.get("decoration.shadow.offset") {
@@ -342,6 +382,8 @@ struct Shared {
     curves: BTreeMap<String, Curve>,
     animations: BTreeMap<String, AnimationConfig>,
     gestures: Vec<Gesture>,
+    window_rules: Vec<crate::rules::WindowRule>,
+    world: World,
     warned: HashSet<String>,
 }
 
@@ -487,6 +529,16 @@ impl Config {
         self.take_queue()
     }
 
+    /// The window rules, in config order.
+    pub fn window_rules(&self) -> std::cell::Ref<'_, [crate::rules::WindowRule]> {
+        std::cell::Ref::map(self.shared.borrow(), |s| s.window_rules.as_slice())
+    }
+
+    /// The state `hl.get_*` queries answer from, until the next call.
+    pub fn set_world(&self, world: World) {
+        self.shared.borrow_mut().world = world;
+    }
+
     /// Evaluates `hl.dispatch(<expr>)` in the config's Lua (IPC's Lua
     /// dispatch, e.g. `hl.dsp.focus({ workspace = "2" })`).
     pub fn eval_dispatch(&self, expr: &str) -> Result<Vec<Action>, String> {
@@ -553,6 +605,146 @@ fn scalar(v: Value) -> Option<ConfigValue> {
         }
         _ => return None,
     })
+}
+
+/// `hl.get_*`: plain tables built from the `World` snapshot, with
+/// Hyprland's field names (`objects/LuaWindow.cpp`, `LuaWorkspace.cpp`).
+/// No groups yet: `window.group` is nil.
+fn install_queries(lua: &Lua, hl: &Table, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
+    fn monitor(lua: &Lua) -> mlua::Result<Table> {
+        let m = lua.create_table()?;
+        m.set("id", 0)?;
+        m.set("name", "darwin-0")?;
+        Ok(m)
+    }
+    fn workspace(lua: &Lua, world: &World, ws: &WorkspaceView) -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        t.set("id", ws.id)?;
+        t.set("name", ws.name.clone())?;
+        t.set("special", ws.id < 0)?;
+        t.set("windows", ws.windows)?;
+        let visible = ws.id == world.active || Some(ws.id) == world.special;
+        t.set("visible", visible)?;
+        t.set("active", visible)?;
+        t.set("has_fullscreen", ws.has_fullscreen)?;
+        t.set("is_empty", ws.windows == 0)?;
+        t.set("monitor", monitor(lua)?)?;
+        Ok(t)
+    }
+    fn workspace_by_id(lua: &Lua, world: &World, id: i32) -> mlua::Result<Value> {
+        match world.workspaces.iter().find(|w| w.id == id) {
+            Some(ws) => Ok(Value::Table(workspace(lua, world, ws)?)),
+            None => Ok(Value::Nil),
+        }
+    }
+    fn window(lua: &Lua, world: &World, w: &WindowView) -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        let xy = |x: f64, y: f64| -> mlua::Result<Table> {
+            let p = lua.create_table()?;
+            p.set("x", x)?;
+            p.set("y", y)?;
+            Ok(p)
+        };
+        t.set("address", w.address.clone())?;
+        t.set("mapped", true)?;
+        t.set("hidden", false)?;
+        t.set("visible", w.workspace == world.active || Some(w.workspace) == world.special)?;
+        t.set("at", xy(w.at.0, w.at.1)?)?;
+        t.set("size", xy(w.size.0, w.size.1)?)?;
+        t.set("workspace", workspace_by_id(lua, world, w.workspace)?)?;
+        t.set("floating", w.floating)?;
+        t.set("monitor", monitor(lua)?)?;
+        t.set("class", w.class.clone())?;
+        t.set("title", w.title.clone())?;
+        t.set("initial_class", w.class.clone())?;
+        t.set("initial_title", w.title.clone())?;
+        t.set("pid", w.pid)?;
+        t.set("xwayland", false)?;
+        t.set("pinned", false)?;
+        t.set("fullscreen", if w.fullscreen { 2 } else { 0 })?;
+        t.set("focus_history_id", w.focus_history_id)?;
+        t.set("active", world.focused.as_deref() == Some(w.address.as_str()))?;
+        t.set("tags", lua.create_table()?)?;
+        Ok(t)
+    }
+    let query = |f: fn(&Lua, &World, MultiValue) -> mlua::Result<Value>| {
+        let shared = shared.clone();
+        lua.create_function(move |lua, args: MultiValue| {
+            let world = shared.borrow().world.clone();
+            f(lua, &world, args)
+        })
+    };
+    hl.set(
+        "get_active_window",
+        query(|lua, world, _| match world.windows.iter().find(|w| world.focused.as_deref() == Some(w.address.as_str())) {
+            Some(w) => Ok(Value::Table(window(lua, world, w)?)),
+            None => Ok(Value::Nil),
+        })?,
+    )?;
+    hl.set(
+        "get_windows",
+        query(|lua, world, _| {
+            let list = lua.create_table()?;
+            for (i, w) in world.windows.iter().enumerate() {
+                list.set(i + 1, window(lua, world, w)?)?;
+            }
+            Ok(Value::Table(list))
+        })?,
+    )?;
+    hl.set(
+        "get_window",
+        query(|lua, world, args| {
+            let address = args.into_iter().next().and_then(|v| v.to_string().ok()).unwrap_or_default();
+            match world.windows.iter().find(|w| w.address == address) {
+                Some(w) => Ok(Value::Table(window(lua, world, w)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+    hl.set("get_active_workspace", query(|lua, world, _| workspace_by_id(lua, world, world.active))?)?;
+    hl.set(
+        "get_active_special_workspace",
+        query(|lua, world, _| match world.special {
+            Some(id) => workspace_by_id(lua, world, id),
+            None => Ok(Value::Nil),
+        })?,
+    )?;
+    hl.set(
+        "get_workspaces",
+        query(|lua, world, _| {
+            let list = lua.create_table()?;
+            for (i, ws) in world.workspaces.iter().enumerate() {
+                list.set(i + 1, workspace(lua, world, ws)?)?;
+            }
+            Ok(Value::Table(list))
+        })?,
+    )?;
+    hl.set(
+        "get_workspace",
+        query(|lua, world, args| {
+            let key = args.into_iter().next().unwrap_or(Value::Nil);
+            let found = world.workspaces.iter().find(|ws| match &key {
+                Value::Integer(n) => i64::from(ws.id) == *n,
+                Value::Number(n) => f64::from(ws.id) == *n,
+                Value::String(s) => s.to_str().is_ok_and(|s| *s == ws.name || s.parse::<i32>() == Ok(ws.id)),
+                _ => false,
+            });
+            match found {
+                Some(ws) => Ok(Value::Table(workspace(lua, world, ws)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+    hl.set(
+        "get_cursor_pos",
+        query(|lua, world, _| {
+            let p = lua.create_table()?;
+            p.set("x", world.cursor.0)?;
+            p.set("y", world.cursor.1)?;
+            Ok(Value::Table(p))
+        })?,
+    )?;
+    Ok(())
 }
 
 fn opt_str(t: &Table, key: &str) -> mlua::Result<Option<String>> {
@@ -711,6 +903,25 @@ fn install_api(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
         )?;
     }
 
+    // hl.window_rule({ name, match = { ... }, effects... }): a handle with set_enabled.
+    {
+        let shared = shared.clone();
+        hl.set(
+            "window_rule",
+            lua.create_function(move |lua, t: Table| {
+                let mut warnings = Vec::new();
+                let rule = crate::rules::WindowRule::parse(&t, |w| warnings.push(w.to_string()))?;
+                let enabled = rule.enabled.clone();
+                let mut s = shared.borrow_mut();
+                for w in warnings {
+                    s.warn_once(&w);
+                }
+                s.window_rules.push(rule);
+                lua.create_userdata(Handle(Some(enabled)))
+            })?,
+        )?;
+    }
+
     // hl.gesture({ fingers, direction, action })
     {
         let shared = shared.clone();
@@ -751,10 +962,7 @@ fn install_api(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
         )?;
     }
 
-    // Queries. No window/workspace objects yet: nil, so configs fall back
-    // (e.g. `local w = hl.get_active_window(); if w and w.group then ...`).
-    hl.set("get_active_window", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
-    hl.set("get_active_workspace", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
+    install_queries(lua, &hl, shared)?;
 
     // hl.dsp: dispatcher constructors.
     let dsp = lua.create_table()?;
@@ -785,6 +993,14 @@ fn install_api(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
             lua.create_userdata(Dsp(action))
         })?,
     )?;
+    let workspace = lua.create_table()?;
+    workspace.set(
+        "toggle_special",
+        lua.create_function(|lua, name: Option<String>| {
+            lua.create_userdata(Dsp(Action::ToggleSpecial(name.unwrap_or_else(|| "special".into()))))
+        })?,
+    )?;
+    dsp.set("workspace", workspace)?;
     let window = lua.create_table()?;
     window.set("close", lua.create_function(|lua, _: MultiValue| lua.create_userdata(Dsp(Action::Close)))?)?;
     window.set("kill", lua.create_function(|lua, _: MultiValue| lua.create_userdata(Dsp(Action::Close)))?)?;
@@ -921,6 +1137,51 @@ mod tests {
     fn default_config_loads() {
         let c = Config::load(Some(Path::new("/nonexistent/hyprland.lua")));
         assert!(!c.shared.borrow().binds.is_empty());
+    }
+
+    #[test]
+    fn users_window_rules() {
+        use crate::rules::{Facts, evaluate};
+        let c = load_str(include_str!("../../docs/exampleconfig.lua"));
+        let rules = c.window_rules();
+        let facts = |class: &str, title: &str| Facts { class: class.into(), title: title.into(), ..Default::default() };
+        assert_eq!(evaluate(&rules, &facts("file-roller", "Archive")).float, Some(true));
+        assert_eq!(evaluate(&rules, &facts("org.gtk.Dialog", "Open File")).float, Some(true));
+        assert_eq!(evaluate(&rules, &facts("vte-2.91-gtk4", "Terminal")).float, None);
+        let run = evaluate(&rules, &facts("hyprland-run", ""));
+        assert_eq!((run.float, run.move_to.as_deref()), (Some(true), Some("20 monitor_h-120")));
+        // Every window gets the maximize suppression; the XWayland drag fix matches nothing here.
+        let any = evaluate(&rules, &facts("", ""));
+        assert_eq!(any.suppress, ["maximize"]);
+        assert!(!any.no_focus);
+    }
+
+    #[test]
+    fn scratchpad_bind_sees_the_window() {
+        // The owner's Cmd+Shift+Minus: into special:magic, or back out of it.
+        let c = load_str(include_str!("../../docs/exampleconfig.lua"));
+        let chord = crate::binds::parse_chord("SUPER + SHIFT + MINUS").unwrap();
+        let mut world = World {
+            active: 2,
+            focused: Some("0x10".into()),
+            windows: vec![WindowView { address: "0x10".into(), workspace: 2, ..Default::default() }],
+            workspaces: vec![
+                WorkspaceView { id: 2, name: "2".into(), windows: 1, ..Default::default() },
+                WorkspaceView { id: -98, name: "special:magic".into(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        c.set_world(world.clone());
+        let actions = c.run_bind(c.find_bind(chord.mods, chord.keysym).unwrap());
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::MoveToWorkspace { target: WorkspaceTarget::Special(n), follow: true }] if n == "magic"
+        ));
+        world.windows[0].workspace = -98;
+        world.special = Some(-98);
+        c.set_world(world);
+        let actions = c.run_bind(c.find_bind(chord.mods, chord.keysym).unwrap());
+        assert!(matches!(actions.as_slice(), [Action::MoveToWorkspace { target: WorkspaceTarget::Id(2), .. }]));
     }
 
     #[test]
