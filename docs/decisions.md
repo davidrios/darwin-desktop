@@ -2,6 +2,20 @@
 
 Newest first. Each entry: what was decided, why, and what it implies. Earlier decisions are recorded in `PROJECT_OUTLINE.md` section 2.
 
+## 2026-11-24: Firefox on Darwin keeps the OS as OSX, uses the GTK toolkit and CoreText fonts
+
+**Decision:** Firefox is ported with `target.os` left as OSX and the GTK 3 Wayland-only toolkit. `XP_DARWIN`/`XP_MACOSX` keep meaning the Darwin OS and its non-AppKit frameworks, and sites that mean AppKit move to `MOZ_WIDGET_COCOA`. Page fonts stay on CoreText (the Mac font path in gfx/2d and WebRender) rather than fontconfig. Rendering is software WebRender through wl_shm until M4. The brief is `firefox-port.md`; the survey is `firefox-notes.md`.
+
+**Why:** Leaving the OS alone keeps Darwin code that works (Mach IPC, CoreAudio, jemalloc zones) and limits the patches to toolkit guards. CoreText needs about 6 overridden methods and no Rust changes, where fontconfig would need about 25 C++ sites and 8 Rust files, each carried through every Firefox release. The cost is that GTK's own UI finds fonts through fontconfig while page content uses CoreText.
+
+## 2026-11-24: M3 scope
+
+**Decision (owner):** Firefox is the browser M3 must bring into the session, and a Mac browser beside the session doesn't count. The editor is bemtvi (terminal mode first, its mitsuami GUI as the goal), and 2ksbox (`~/work/win-98-xp-virt`, also on mitsuami) should run in the session too. Qt 6, multi-monitor and input methods move out of M3. Chrome waits for a later milestone.
+
+**Why:** M3's exit is a working day without the Mac desktop, so it's scoped to what the owner uses every day. Qt has no daily app to justify building it, and work happens on the built-in panel for now.
+
+**Implications:** The plan is in `m3-plan.md`. The Firefox port starts first, in the background, because it's the biggest risk. mitsuami gains a way to use its GTK backend on macOS, and wgpu reaches the compositor through wl_shm copies until M4's IOSurface protocol.
+
 ## 2026-11-21: keyboard layouts generated from macOS; input methods via fcitx5 later
 
 **Decision:**
