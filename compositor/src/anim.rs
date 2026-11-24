@@ -678,8 +678,16 @@ impl State {
         for window in windows {
             let Some(goal) = self.goal_rect(&window) else { continue };
             let s = &self.config.settings;
-            let border =
-                if focused.as_ref() == Some(&window) { s.active_border.clone() } else { s.inactive_border.clone() };
+            let is_focused = focused.as_ref() == Some(&window);
+            let g = &s.group;
+            let border = match (self.group_locked(&window), is_focused) {
+                (None, true) => s.active_border.clone(),
+                (None, false) => s.inactive_border.clone(),
+                (Some(false), true) => g.border_active.clone(),
+                (Some(false), false) => g.border_inactive.clone(),
+                (Some(true), true) => g.border_locked_active.clone(),
+                (Some(true), false) => g.border_locked_inactive.clone(),
+            };
             let has_buffer = window.wl_surface().is_some_and(|surface| {
                 smithay::wayland::compositor::with_states(&surface, |states| {
                     states
@@ -740,7 +748,7 @@ impl State {
         // The workspace being left: its windows keep animating while they slide out.
         if let Some(tr) = &mut self.wm.transition {
             busy |= tr.tick(now);
-            let leaving = self.wm.workspaces.get(&tr.from).map(|ws| ws.windows()).unwrap_or_default();
+            let leaving = self.wm.workspaces.get(&tr.from).map(|ws| ws.shown()).unwrap_or_default();
             for w in leaving {
                 if let Some(slot) = w.user_data().get::<AnimSlot>() {
                     if let Some(a) = slot.borrow_mut().as_mut() {
@@ -759,7 +767,7 @@ impl State {
         if let Some(sa) = &mut self.wm.special_anim {
             busy |= sa.tick(now);
             if !sa.showing {
-                let hiding = self.wm.workspaces.get(&sa.id).map(|ws| ws.windows()).unwrap_or_default();
+                let hiding = self.wm.workspaces.get(&sa.id).map(|ws| ws.shown()).unwrap_or_default();
                 for w in hiding {
                     if let Some(slot) = w.user_data().get::<AnimSlot>() {
                         if let Some(a) = slot.borrow_mut().as_mut() {

@@ -127,6 +127,18 @@ pub fn parse_color(v: &ConfigValue) -> Option<Rgba> {
     }
 }
 
+/// 0xAARRGGBB to premultiplied RGBA.
+fn argb_premultiplied(n: u32) -> Rgba {
+    let a = ((n >> 24) & 0xff) as f32 / 255.0;
+    let c = |shift: u32| ((n >> shift) & 0xff) as f32 / 255.0 * a;
+    [c(16), c(8), c(0), a]
+}
+
+/// Premultiplied RGBA back to straight.
+fn unpremultiply(c: Rgba) -> Rgba {
+    if c[3] <= 0.0 { [0.0; 4] } else { [c[0] / c[3], c[1] / c[3], c[2] / c[3], c[3]] }
+}
+
 fn parse_gradient(flat: &BTreeMap<String, ConfigValue>, key: &str) -> Option<Gradient> {
     if let Some(v) = flat.get(key) {
         if let ConfigValue::List(items) = v {
@@ -177,6 +189,17 @@ pub struct WindowView {
     pub size: (f64, f64),
     pub pid: i64,
     pub focus_history_id: i32,
+    pub group: Option<GroupView>,
+}
+
+/// A window's group, as `window.group` (Hyprland's `objects/LuaGroup.cpp`).
+#[derive(Clone, Debug, Default)]
+pub struct GroupView {
+    /// 1-based, as Hyprland's Lua.
+    pub current_index: usize,
+    pub locked: bool,
+    /// Addresses, in tab order.
+    pub members: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -210,6 +233,63 @@ pub struct SwipeConfig {
     pub invert: bool,
     /// Swiping past the last workspace makes a new one.
     pub create_new: bool,
+}
+
+/// The `group` section, with Hyprland's defaults.
+#[derive(Clone, Debug)]
+pub struct GroupConfig {
+    pub border_active: Gradient,
+    pub border_inactive: Gradient,
+    pub border_locked_active: Gradient,
+    pub border_locked_inactive: Gradient,
+    /// New windows join the focused (unlocked) group.
+    pub auto_group: bool,
+    pub insert_after_current: bool,
+    pub bar: GroupbarConfig,
+}
+
+/// `group.groupbar`: the tab strip above a grouped window.
+#[derive(Clone, Debug)]
+pub struct GroupbarConfig {
+    pub enabled: bool,
+    pub disable_when_only: bool,
+    pub font_family: Option<String>,
+    pub font_size: f64,
+    pub height: f64,
+    pub indicator_height: f64,
+    pub indicator_gap: f64,
+    pub render_titles: bool,
+    pub rounding: f64,
+    pub gaps_in: f64,
+    pub gaps_out: f64,
+    pub keep_upper_gap: bool,
+    pub text_offset: f64,
+    pub text_padding: f64,
+    /// Straight RGBA (not premultiplied: the text is drawn with them).
+    pub text_color: [f32; 4],
+    pub text_color_inactive: [f32; 4],
+    pub text_color_locked_active: [f32; 4],
+    pub text_color_locked_inactive: [f32; 4],
+    /// Premultiplied, as the borders.
+    pub col_active: [f32; 4],
+    pub col_inactive: [f32; 4],
+    pub col_locked_active: [f32; 4],
+    pub col_locked_inactive: [f32; 4],
+}
+
+impl GroupbarConfig {
+    /// The space the bar takes above a window (Hyprland's desiredExtents).
+    pub fn reserved(&self) -> f64 {
+        if !self.enabled {
+            return 0.0;
+        }
+        self.gaps_out * (1.0 + self.keep_upper_gap as u8 as f64) + self.one_bar()
+    }
+
+    /// One bar: the indicator, its gap and the title strip.
+    pub fn one_bar(&self) -> f64 {
+        self.indicator_height + self.indicator_gap + if self.render_titles { self.height } else { 0.0 }
+    }
 }
 
 /// `decoration.shadow`, with Hyprland's defaults.
@@ -272,6 +352,7 @@ pub struct Settings {
     pub rounding: i32,
     /// `decoration.dim_special`: how much the workspace under a special one darkens.
     pub dim_special: f64,
+    pub group: GroupConfig,
     pub shadow: ShadowConfig,
     pub blur: BlurConfig,
     pub layout: String,
@@ -308,6 +389,49 @@ impl Settings {
                 .unwrap_or(Gradient::solid([0.267, 0.267, 0.267, 1.0])),
             rounding: num("decoration.rounding", 0.0) as i32,
             dim_special: num("decoration.dim_special", 0.2).clamp(0.0, 1.0),
+            group: {
+                let argb = |n: u32| Gradient::solid(argb_premultiplied(n));
+                let grad = |k: &str, d: u32| parse_gradient(flat, k).unwrap_or_else(|| argb(d));
+                let color = |k: &str, d: u32| grad(k, d).colors[0];
+                let text = |k: &str| parse_gradient(flat, k).map(|g| unpremultiply(g.colors[0]));
+                let text_color = text("group.groupbar.text_color").unwrap_or([1.0; 4]);
+                let text_inactive = text("group.groupbar.text_color_inactive").unwrap_or(text_color);
+                GroupConfig {
+                    border_active: grad("group.col.border_active", 0x66ffff00),
+                    border_inactive: grad("group.col.border_inactive", 0x66777700),
+                    border_locked_active: grad("group.col.border_locked_active", 0x66775500),
+                    border_locked_inactive: grad("group.col.border_locked_inactive", 0x66ff5500),
+                    auto_group: num("group.auto_group", 1.0) != 0.0,
+                    insert_after_current: num("group.insert_after_current", 1.0) != 0.0,
+                    bar: GroupbarConfig {
+                        enabled: num("group.groupbar.enabled", 1.0) != 0.0,
+                        disable_when_only: num("group.groupbar.disable_when_only", 0.0) != 0.0,
+                        font_family: match flat.get("group.groupbar.font_family") {
+                            Some(ConfigValue::Str(s)) if !s.is_empty() && s != "[[EMPTY]]" => Some(s.clone()),
+                            _ => None,
+                        },
+                        font_size: num("group.groupbar.font_size", 8.0).clamp(2.0, 64.0),
+                        height: num("group.groupbar.height", 14.0).clamp(1.0, 64.0),
+                        indicator_height: num("group.groupbar.indicator_height", 3.0).clamp(0.0, 64.0),
+                        indicator_gap: num("group.groupbar.indicator_gap", 0.0).clamp(0.0, 64.0),
+                        render_titles: num("group.groupbar.render_titles", 1.0) != 0.0,
+                        rounding: num("group.groupbar.rounding", 1.0).clamp(0.0, 40.0),
+                        gaps_in: num("group.groupbar.gaps_in", 2.0).clamp(0.0, 20.0),
+                        gaps_out: num("group.groupbar.gaps_out", 2.0).clamp(0.0, 20.0),
+                        keep_upper_gap: num("group.groupbar.keep_upper_gap", 1.0) != 0.0,
+                        text_offset: num("group.groupbar.text_offset", 0.0),
+                        text_padding: num("group.groupbar.text_padding", 0.0).max(0.0),
+                        text_color,
+                        text_color_inactive: text_inactive,
+                        text_color_locked_active: text("group.groupbar.text_color_locked_active").unwrap_or(text_color),
+                        text_color_locked_inactive: text("group.groupbar.text_color_locked_inactive").unwrap_or(text_inactive),
+                        col_active: color("group.groupbar.col.active", 0x66ffff00),
+                        col_inactive: color("group.groupbar.col.inactive", 0x66777700),
+                        col_locked_active: color("group.groupbar.col.locked_active", 0x66ff5500),
+                        col_locked_inactive: color("group.groupbar.col.locked_inactive", 0x66775500),
+                    },
+                }
+            },
             shadow: {
                 let color = |k: &str| parse_gradient(flat, k).and_then(|g| g.colors.first().copied());
                 let offset = match flat.get("decoration.shadow.offset") {
@@ -665,6 +789,25 @@ fn install_queries(lua: &Lua, hl: &Table, shared: &Rc<RefCell<Shared>>) -> mlua:
         t.set("focus_history_id", w.focus_history_id)?;
         t.set("active", world.focused.as_deref() == Some(w.address.as_str()))?;
         t.set("tags", lua.create_table()?)?;
+        if let Some(g) = &w.group {
+            let group = lua.create_table()?;
+            group.set("size", g.members.len())?;
+            group.set("current_index", g.current_index)?;
+            group.set("locked", g.locked)?;
+            group.set("denied", false)?;
+            let members = lua.create_table()?;
+            for (i, address) in g.members.iter().enumerate() {
+                let m = lua.create_table()?;
+                m.set("address", address.clone())?;
+                if let Some(v) = world.windows.iter().find(|v| v.address == *address) {
+                    m.set("class", v.class.clone())?;
+                    m.set("title", v.title.clone())?;
+                }
+                members.set(i + 1, m)?;
+            }
+            group.set("members", members)?;
+            t.set("group", group)?;
+        }
         Ok(t)
     }
     let query = |f: fn(&Lua, &World, MultiValue) -> mlua::Result<Value>| {
@@ -1001,6 +1144,36 @@ fn install_api(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
         })?,
     )?;
     dsp.set("workspace", workspace)?;
+    let group = lua.create_table()?;
+    group.set("toggle", lua.create_function(|lua, _: MultiValue| lua.create_userdata(Dsp(Action::ToggleGroup)))?)?;
+    group.set("next", lua.create_function(|lua, _: MultiValue| lua.create_userdata(Dsp(Action::GroupCycle(1))))?)?;
+    group.set("prev", lua.create_function(|lua, _: MultiValue| lua.create_userdata(Dsp(Action::GroupCycle(-1))))?)?;
+    group.set(
+        "move_window",
+        lua.create_function(|lua, t: Option<Table>| {
+            let forward = match t {
+                Some(t) => t.get::<Option<bool>>("forward")?.unwrap_or(true),
+                None => true,
+            };
+            lua.create_userdata(Dsp(Action::GroupMoveWindow { forward }))
+        })?,
+    )?;
+    group.set(
+        "lock",
+        lua.create_function(|lua, t: Option<Table>| {
+            let action = match &t {
+                Some(t) => opt_str(t, "action")?,
+                None => None,
+            };
+            let on = match action.as_deref() {
+                Some("lock") | Some("set") => Some(true),
+                Some("unlock") | Some("unset") => Some(false),
+                _ => None,
+            };
+            lua.create_userdata(Dsp(Action::LockGroup(on)))
+        })?,
+    )?;
+    dsp.set("group", group)?;
     let window = lua.create_table()?;
     window.set("close", lua.create_function(|lua, _: MultiValue| lua.create_userdata(Dsp(Action::Close)))?)?;
     window.set("kill", lua.create_function(|lua, _: MultiValue| lua.create_userdata(Dsp(Action::Close)))?)?;
@@ -1013,7 +1186,11 @@ fn install_api(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
             let action = if let Some(ws) = opt_str(&t, "workspace")?.as_deref().and_then(WorkspaceTarget::parse) {
                 Action::MoveToWorkspace { target: ws, follow }
             } else if let Some(d) = opt_str(&t, "direction")?.as_deref().and_then(Direction::parse) {
-                Action::MoveWindow(d)
+                if t.get::<Option<bool>>("group_aware")?.unwrap_or(false) {
+                    Action::MoveWindowOrGroup(d)
+                } else {
+                    Action::MoveWindow(d)
+                }
             } else {
                 Action::Unsupported("hl.dsp.window.move with these options".into())
             };
@@ -1137,6 +1314,34 @@ mod tests {
     fn default_config_loads() {
         let c = Config::load(Some(Path::new("/nonexistent/hyprland.lua")));
         assert!(!c.shared.borrow().binds.is_empty());
+    }
+
+    #[test]
+    fn group_helpers_see_the_group() {
+        // The owner's Cmd+h/l: next/previous tab while there is one that way, else focus.
+        let c = load_str(include_str!("../../docs/exampleconfig.lua"));
+        let run = |keys: &str, world: &World| {
+            c.set_world(world.clone());
+            let chord = crate::binds::parse_chord(keys).unwrap();
+            c.run_bind(c.find_bind(chord.mods, chord.keysym).unwrap())
+        };
+        let group = |current| GroupView { current_index: current, locked: false, members: vec!["0x1".into(), "0x2".into()] };
+        let mut world = World {
+            active: 1,
+            focused: Some("0x1".into()),
+            windows: vec![WindowView { address: "0x1".into(), workspace: 1, group: Some(group(1)), ..Default::default() }],
+            workspaces: vec![WorkspaceView { id: 1, name: "1".into(), windows: 2, ..Default::default() }],
+            ..Default::default()
+        };
+        assert!(matches!(run("SUPER + l", &world).as_slice(), [Action::GroupCycle(1)]));
+        assert!(matches!(run("SUPER + h", &world).as_slice(), [Action::Focus(Direction::Left)]));
+        assert!(matches!(run("SUPER + SHIFT + l", &world).as_slice(), [Action::GroupMoveWindow { forward: true }]));
+        assert!(matches!(run("SUPER + SHIFT + h", &world).as_slice(), [Action::MoveWindowOrGroup(Direction::Left)]));
+        world.windows[0].group = Some(group(2));
+        assert!(matches!(run("SUPER + h", &world).as_slice(), [Action::GroupCycle(-1)]));
+        assert!(matches!(run("SUPER + w", &world).as_slice(), [Action::ToggleGroup]));
+        world.windows[0].group = None;
+        assert!(matches!(run("SUPER + l", &world).as_slice(), [Action::Focus(Direction::Right)]));
     }
 
     #[test]

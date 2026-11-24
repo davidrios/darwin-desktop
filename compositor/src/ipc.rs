@@ -327,6 +327,10 @@ impl State {
             .and_then(|c| c.get_credentials(&self.display_handle).ok())
             .map(|c| c.pid)
             .unwrap_or(-1);
+        let grouped = ws
+            .and_then(|(_, ws)| ws.group_of(window))
+            .map(|g| g.members.iter().map(|m| js(&format!("0x{:x}", window_id(m)))).collect::<Vec<_>>().join(","))
+            .unwrap_or_default();
         let (ws_id, floating, fullscreen, history) = match ws {
             Some((id, ws)) => (
                 id,
@@ -337,7 +341,7 @@ impl State {
             None => (-1, false, false, -1),
         };
         format!(
-            r#"{{"address":{addr},"mapped":true,"hidden":false,"at":[{x},{y}],"size":[{w},{h}],"workspace":{{"id":{ws_id},"name":{ws_name}}},"floating":{floating},"pseudo":false,"monitor":0,"class":{class},"title":{title},"initialClass":{class},"initialTitle":{title},"pid":{pid},"xwayland":false,"pinned":false,"fullscreen":{fs},"fullscreenClient":{fs},"grouped":[],"tags":[],"swallowing":"0x0","focusHistoryID":{history},"inhibitingIdle":false,"xdgTag":"","xdgDescription":"","contentType":"none"}}"#,
+            r#"{{"address":{addr},"mapped":true,"hidden":false,"at":[{x},{y}],"size":[{w},{h}],"workspace":{{"id":{ws_id},"name":{ws_name}}},"floating":{floating},"pseudo":false,"monitor":0,"class":{class},"title":{title},"initialClass":{class},"initialTitle":{title},"pid":{pid},"xwayland":false,"pinned":false,"fullscreen":{fs},"fullscreenClient":{fs},"grouped":[{grouped}],"tags":[],"swallowing":"0x0","focusHistoryID":{history},"inhibitingIdle":false,"xdgTag":"","xdgDescription":"","contentType":"none"}}"#,
             addr = js(&format!("0x{:x}", window_id(window))),
             x = rect.x.round() as i32,
             y = rect.y.round() as i32,
@@ -397,6 +401,11 @@ impl State {
                     size: (rect.w, rect.h),
                     pid,
                     focus_history_id: ws.focus_history_id(&w),
+                    group: ws.group_of(&w).map(|g| crate::config::GroupView {
+                        current_index: g.current + 1,
+                        locked: g.locked,
+                        members: g.members.iter().map(|m| format!("0x{:x}", window_id(m))).collect(),
+                    }),
                 });
             }
             if self.wm.visible(*id) || !ws.is_empty() {
@@ -506,6 +515,15 @@ impl State {
                 "movetoworkspace" => workspace().map(|target| Action::MoveToWorkspace { target, follow: true }),
                 "movetoworkspacesilent" => workspace().map(|target| Action::MoveToWorkspace { target, follow: false }),
                 "exec" => Some(Action::Exec(arg.to_string())),
+                "togglegroup" => Some(Action::ToggleGroup),
+                "changegroupactive" => Some(Action::GroupCycle(if arg == "b" { -1 } else { 1 })),
+                "movegroupwindow" => Some(Action::GroupMoveWindow { forward: arg != "b" }),
+                "lockactivegroup" => Some(Action::LockGroup(match arg {
+                    "lock" => Some(true),
+                    "unlock" => Some(false),
+                    _ => None,
+                })),
+                "movewindoworgroup" => crate::binds::Direction::parse(arg).map(Action::MoveWindowOrGroup),
                 "togglespecialworkspace" => {
                     Some(Action::ToggleSpecial(if arg.is_empty() { "special".into() } else { arg.to_string() }))
                 }

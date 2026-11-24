@@ -21,6 +21,8 @@ mlua = { version = "=0.12.2", features = ["lua55", "vendored"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 regex = { version = "=1.13.2", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
+objc2-core-text = "=0.3.2"
+objc2-core-graphics = "=0.3.2"
 
 # Patched sources (patches/README.md): run scripts/prepare-third-party.sh first.
 [patch.crates-io]

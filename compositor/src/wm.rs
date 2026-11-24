@@ -37,17 +37,42 @@ pub fn clip_of(window: &Window) -> Option<Rectangle<i32, Logical>> {
     window.user_data().get::<TileClip>().and_then(|c| c.0.get())
 }
 
+/// A tabbed group (groups.rs): its current member holds the group's place
+/// (a tile or a floating spot); the others are hidden until chosen.
+pub struct Group {
+    pub members: Vec<Window>,
+    pub current: usize,
+    pub locked: bool,
+}
+
+impl Group {
+    pub fn current(&self) -> &Window {
+        &self.members[self.current]
+    }
+}
+
 #[derive(Default)]
 pub struct Workspace {
     pub tiled: Dwindle<Window>,
     pub floating: Vec<Window>,
     pub fullscreen: Option<Window>,
+    pub groups: Vec<Group>,
     /// Most recently focused last.
-    history: Vec<Window>,
+    pub(crate) history: Vec<Window>,
 }
 
 impl Workspace {
+    /// Every window, hidden group members included.
     pub fn windows(&self) -> Vec<Window> {
+        let mut all = self.shown();
+        for g in &self.groups {
+            all.extend(g.members.iter().filter(|m| *m != g.current()).cloned());
+        }
+        all
+    }
+
+    /// The windows on screen: tiles, then floating ones (a group shows its current member).
+    pub fn shown(&self) -> Vec<Window> {
         let mut all: Vec<Window> = self.tiled.tiles().into_iter().map(|(w, _)| w).collect();
         all.extend(self.floating.iter().cloned());
         all
@@ -58,10 +83,70 @@ impl Workspace {
     }
 
     pub fn contains(&self, w: &Window) -> bool {
+        self.holds_place(w) || self.groups.iter().any(|g| g.members.contains(w))
+    }
+
+    /// In a tile or floating (not a hidden group member).
+    fn holds_place(&self, w: &Window) -> bool {
         self.tiled.contains(w) || self.floating.contains(w)
     }
 
-    fn forget(&mut self, w: &Window) {
+    pub fn group_index(&self, w: &Window) -> Option<usize> {
+        self.groups.iter().position(|g| g.members.contains(w))
+    }
+
+    pub fn group_of(&self, w: &Window) -> Option<&Group> {
+        self.group_index(w).map(|i| &self.groups[i])
+    }
+
+    /// `new` takes `old`'s place (tile, floating spot, fullscreen).
+    fn put_in_place(&mut self, old: &Window, new: Window) {
+        if !self.tiled.replace(old, new.clone()) {
+            if let Some(slot) = self.floating.iter_mut().find(|f| *f == old) {
+                *slot = new.clone();
+            }
+        }
+        if self.fullscreen.as_ref() == Some(old) {
+            self.fullscreen = Some(new);
+        }
+    }
+
+    /// Make member `index` of group `gi` the one shown. Returns the one it replaced.
+    pub fn show_member(&mut self, gi: usize, index: usize) -> Option<Window> {
+        let g = &mut self.groups[gi];
+        if index == g.current || index >= g.members.len() {
+            return None;
+        }
+        let old = g.current().clone();
+        g.current = index;
+        let new = g.current().clone();
+        self.put_in_place(&old, new);
+        Some(old)
+    }
+
+    pub(crate) fn forget(&mut self, w: &Window) {
+        self.history.retain(|h| h != w);
+        if let Some(gi) = self.group_index(w) {
+            let g = &mut self.groups[gi];
+            let index = g.members.iter().position(|m| m == w).unwrap();
+            let was_current = index == g.current;
+            g.members.remove(index);
+            if g.members.is_empty() {
+                self.groups.remove(gi);
+            } else {
+                if was_current {
+                    g.current = index.min(g.members.len() - 1);
+                } else if index < g.current {
+                    g.current -= 1;
+                }
+                if was_current {
+                    // The next member takes its place.
+                    let next = g.current().clone();
+                    self.put_in_place(w, next);
+                }
+                return;
+            }
+        }
         self.tiled.remove(w);
         self.floating.retain(|f| f != w);
         self.history.retain(|h| h != w);
@@ -76,7 +161,7 @@ impl Workspace {
     }
 
     pub fn last_focused(&self) -> Option<Window> {
-        self.history.iter().rev().find(|w| self.contains(w)).cloned().or_else(|| self.windows().into_iter().next())
+        self.history.iter().rev().find(|w| self.holds_place(w)).cloned().or_else(|| self.shown().into_iter().next())
     }
 }
 
@@ -301,6 +386,17 @@ impl State {
             }
             return;
         }
+        // `group.auto_group`: into the focused window's group, as its new tab.
+        if !float && self.auto_group(&window) {
+            if let Some(ws) = self.wm.workspaces.get_mut(&here) {
+                ws.history.push(window.clone());
+            }
+            self.relayout();
+            if !rules.no_initial_focus && !rules.no_focus {
+                self.focus(Some(window), SERIAL_COUNTER.next_serial());
+            }
+            return;
+        }
         let pointer = (self.pointer_location.x, self.pointer_location.y);
         let area = self.work_area();
         let opening_on = if self.config.settings.dwindle.use_active_for_splits {
@@ -424,7 +520,13 @@ impl State {
             if fullscreen.as_ref() == Some(&window) {
                 continue;
             }
-            let rect = self.window_rect(tile, area);
+            let mut rect = self.window_rect(tile, area);
+            // A group's tab bar sits above its window, inside the tile.
+            let bar = self.groupbar_height(&window).round() as i32;
+            if bar > 0 {
+                rect.loc.y += bar;
+                rect.size.h = (rect.size.h - bar).max(1);
+            }
             tracing::debug!(?tile, ?rect, "tile");
             configure(&window, Some(rect.size), true, false);
             set_clip(&window, Some(rect));
@@ -514,6 +616,10 @@ impl State {
         if window.as_ref().is_some_and(|w| self.rule_effects(w).no_focus) {
             return;
         }
+        // A hidden group member is shown first.
+        if let Some(w) = &window {
+            self.reveal_group_member(w);
+        }
         if let Some(w) = &window {
             if let Some(id) = self.workspace_of(w) {
                 let ws = self.wm.workspaces.get_mut(&id).unwrap();
@@ -599,17 +705,29 @@ impl State {
         if from == target {
             return;
         }
-        let floating = self.wm.workspaces[&from].floating.contains(&window);
-        self.wm.workspaces.get_mut(&from).unwrap().forget(&window);
-        self.space.unmap_elem(&window);
+        // A grouped window takes its whole group along (as Hyprland): the
+        // group's place moves, its members and tab order with it.
+        let src = self.wm.workspaces.get_mut(&from).unwrap();
+        let group = src.group_index(&window).map(|gi| src.groups.remove(gi));
+        let place = group.as_ref().map(|g| g.current().clone()).unwrap_or_else(|| window.clone());
+        let floating = src.floating.contains(&place);
+        src.forget(&place);
+        let moving = group.as_ref().map(|g| g.members.clone()).unwrap_or_else(|| vec![window.clone()]);
+        src.history.retain(|h| !moving.contains(h));
+        for w in &moving {
+            self.space.unmap_elem(w);
+        }
         let area = self.work_area();
         let cfg = self.config.settings.dwindle.clone();
         let dest = self.wm.workspaces.entry(target).or_default();
         if floating {
-            dest.floating.push(window.clone());
+            dest.floating.push(place.clone());
         } else {
             let opening_on = dest.last_focused();
-            dest.tiled.insert(window.clone(), opening_on.as_ref(), None, area, &cfg);
+            dest.tiled.insert(place.clone(), opening_on.as_ref(), None, area, &cfg);
+        }
+        if let Some(g) = group {
+            dest.groups.push(g);
         }
         dest.history.push(window.clone());
         if follow {
@@ -638,7 +756,7 @@ impl State {
     }
 
     /// The nearest window on the active workspace in a direction.
-    fn neighbour(&self, from: &Window, dir: Direction) -> Option<Window> {
+    pub(crate) fn neighbour(&self, from: &Window, dir: Direction) -> Option<Window> {
         let geo = |w: &Window| {
             let loc = self.space.element_location(w)?;
             Some(Rectangle::new(loc, w.geometry().size))
@@ -763,6 +881,11 @@ impl State {
                 self.set_fullscreen(&w, on);
             }
             // Only meaningful on a mouse bind (input.rs starts the drag).
+            Action::ToggleGroup
+            | Action::GroupCycle(_)
+            | Action::GroupMoveWindow { .. }
+            | Action::LockGroup(_)
+            | Action::MoveWindowOrGroup(_) => self.group_action(action),
             Action::MouseDrag | Action::MouseResize => tracing::debug!("drag/resize dispatcher outside a mouse bind"),
             Action::Unsupported(name) => tracing::warn!("{name} is not supported yet"),
         }

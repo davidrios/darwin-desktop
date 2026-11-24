@@ -86,6 +86,16 @@ pub enum Action {
     FocusWorkspace(WorkspaceTarget),
     MoveWindow(Direction),
     MoveToWorkspace { target: WorkspaceTarget, follow: bool },
+    /// `hl.dsp.group.toggle()`.
+    ToggleGroup,
+    /// `hl.dsp.group.next()` (+1) / `prev()` (-1).
+    GroupCycle(i32),
+    /// `hl.dsp.group.move_window({ forward })`.
+    GroupMoveWindow { forward: bool },
+    /// `hl.dsp.group.lock({ action })`: Some(on), or None to toggle.
+    LockGroup(Option<bool>),
+    /// `hl.dsp.window.move({ direction, group_aware = true })`.
+    MoveWindowOrGroup(Direction),
     /// `hl.dsp.workspace.toggle_special(name)`: show or hide a special workspace.
     ToggleSpecial(String),
     /// `hl.dsp.window.drag()` on a mouse bind: move the window under the pointer.

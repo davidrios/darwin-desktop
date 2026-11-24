@@ -18,7 +18,7 @@ Special workspaces and Lua query objects (step 6) are written and unit-tested (t
 
 Window rules (step 7) are written and unit-tested against the owner's rules; seen working by hand (2026-11-24).
 
-Still to do in M2: groups.
+Groups (step 8) are written and unit-tested (the owner's group binds run against them, titles render in a test); seen working by hand (2026-11-24). With them every M2 feature in the owner's config exists in some form.
 
 ## Config: Hyprland's Lua config
 
@@ -140,3 +140,18 @@ Only the workspace action; other `hl.gesture` actions warn once.
 When a window opens (its first commit, title and app id known): `float`/`tile`, `size` and `move` (floating: "x y" expressions with `N%`, `monitor_w/h`, `window_w/h`, `cursor_x/y`, `+ - * /`, parentheses; `move` is applied once the window's size is known), `center` (the default anyway), `workspace` ("3", "special:magic", "... silent" to leave the focus where it is), `fullscreen`, `no_initial_focus`. While it's open (evaluated again whenever the window's class, title, floating, fullscreen, focus or workspace change): `no_focus` (never takes the keyboard), `suppress_event` ("fullscreen" ignores the client's request; "maximize" has nothing to suppress, there's no maximized state), `rounding`, `border_size` (drawn only: the layout still reserves the configured border), `opacity` ("active [inactive]"), `no_shadow`, `no_blur`, `no_anim`, `decorate` (false: no border or shadow). Other effects warn once.
 
 Not yet: workspace selectors in `match` (`w[tv1]`, `f[1]`), `hl.workspace_rule`, `hl.layer_rule`, tags, `initial_*` kept from the first commit, `monitor`, `pin`, `group`, `animation`, `border_color`, `min_size`/`max_size`.
+
+## Groups
+
+`compositor/src/groups.rs`, Hyprland's tabbed groups. A group (`wm::Group`) belongs to a workspace; its current member holds the group's place (a dwindle leaf, swapped with `Dwindle::replace`, or a floating spot) and the others are hidden: kept in the workspace (`Workspace::windows`, so IPC, Lua and commits find them) but not mapped or drawn (`Workspace::shown`). Focusing a hidden member (from focus history, a tab click, the IPC) shows it first.
+
+- `hl.dsp.group.toggle()`: the focused window becomes a group of one; on a grouped window, the group breaks up into tiles next to it.
+- `group.auto_group` (default on): a new tiled window opening while the focused window is in an unlocked group joins it as the new current tab, after the current one (`insert_after_current`) or at the end.
+- `group.next()`/`prev()` (wrapping), `group.move_window({ forward })` (reorders the tab, wrapping), `group.lock({ action = "lock"|"unlock"|... })` (locked groups take no new windows).
+- `window.move({ direction, group_aware = true })` is Hyprland's `movewindoworgroup`: out of a group of more than one into a tile on that side; else into an unlocked group in that direction; else a plain move. IPC: `togglegroup`, `changegroupactive f|b`, `movegroupwindow f|b`, `lockactivegroup`, `movewindoworgroup`.
+- Moving a grouped window to another workspace (`window.move({ workspace })`, IPC `movetoworkspace[silent]`, the scratchpad bind into a special workspace) moves the whole group, its tab order and lock with it, as Hyprland; with `follow` the moved window is the tab shown.
+- Lua `window.group = { size, current_index (1-based), locked, members = { { address, class, title }, ... } }`; IPC `clients` fill `grouped`.
+
+The tab bar (`group.groupbar`, Hyprland's defaults and layout): reserved above the window inside its tile, `gaps_out × (1 + keep_upper_gap) + indicator_height + indicator_gap + height` tall; a tab per member sharing the width with `gaps_in` between: an indicator line (`col.active` for the focused window, `col.inactive` otherwise, `col.locked_*` when locked; rounded by `rounding`) at the bottom and the title centred in the `height` strip above it (`font_size` points in `font_family`, the system UI font by default; `text_color*`, `text_padding`, `text_offset`). Grouped windows get `group.col.border_*`. Clicking a tab shows that window. Titles are drawn with Core Text (`text.rs`) into BGRA textures, cached by title, size and colour.
+
+Not yet: `stacked` bars, `gradients`, font weights, `round_only_edges` (every tab's indicator is rounded), middle-click close and scrolling on the bar, dragging windows into or out of bars, `group_on_movetoworkspace`, floating groups reserving space (their bar sits above the window).

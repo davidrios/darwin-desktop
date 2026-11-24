@@ -196,6 +196,13 @@ pub fn pointer_button(state: &mut State, button: u32, pressed: bool, time: Input
         use smithay::wayland::shell::wlr_layer::Layer;
         let pos = state.pointer_location;
         let upper = state.layer_surface_under(state.upper_layers(), pos);
+        // A group's tab: show that window (the click isn't a client's).
+        if upper.is_none() && button == BTN_LEFT {
+            if let Some(tab) = state.groupbar_hit(pos.x, pos.y) {
+                state.focus(Some(tab), serial);
+                return;
+            }
+        }
         if let Some((layer, _, _)) = upper {
             state.focus_layer_on_click(&layer);
         } else if let Some(window) = state.window_under(pos) {

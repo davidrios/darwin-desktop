@@ -260,6 +260,13 @@ impl<T: Clone + PartialEq> Dwindle<T> {
         }
     }
 
+    /// Puts `new` in `old`'s place (a group's tile changing hands).
+    pub fn replace(&mut self, old: &T, new: T) -> bool {
+        let Some(leaf) = self.leaf_of(old) else { return false };
+        self.node_mut(leaf).kind = Kind::Leaf(new);
+        true
+    }
+
     /// Exchanges two windows' places.
     pub fn swap(&mut self, a: &T, b: &T) {
         let (Some(la), Some(lb)) = (self.leaf_of(a), self.leaf_of(b)) else { return };

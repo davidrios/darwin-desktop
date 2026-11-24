@@ -385,6 +385,8 @@ pub struct Renderer {
     /// prepare, down, up, finish.
     blur_pipelines: [Retained<ProtocolObject<dyn MTLRenderPipelineState>>; 4],
     blur_targets: RefCell<Option<BlurTargets>>,
+    /// Group bar titles, drawn once per title, size and colour.
+    titles: RefCell<std::collections::HashMap<TitleKey, Texture>>,
     pub layer: Retained<CAMetalLayer>,
 }
 
@@ -419,6 +421,18 @@ struct Look<'a> {
     rounding: f64,
     border_size: f64,
     shadow: bool,
+    /// A group's tab bar above the window.
+    group: Option<crate::groups::GroupLook>,
+}
+
+/// A title drawn into a texture, by everything that changes its pixels.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct TitleKey {
+    text: String,
+    width: usize,
+    height: usize,
+    font_px: u32,
+    color: [u8; 4],
 }
 
 impl Renderer {
@@ -468,6 +482,7 @@ impl Renderer {
             shadow_pipeline,
             blur_pipelines,
             blur_targets: RefCell::new(None),
+            titles: RefCell::new(Default::default()),
             layer,
         }
     }
@@ -519,7 +534,7 @@ impl Renderer {
         // A workspace switch: the workspace being left, sliding or fading out.
         if let Some(tr) = transition {
             if let Some(ws) = state.wm.workspaces.get(&tr.from) {
-                let mut windows = ws.windows();
+                let mut windows = ws.shown();
                 if let Some(fs) = &ws.fullscreen {
                     windows.retain(|w| w != fs);
                     windows.push(fs.clone());
@@ -528,7 +543,7 @@ impl Renderer {
                     let fullscreen = ws.fullscreen.as_ref() == Some(window);
                     let floating = ws.floating.contains(window);
                     let focused = false;
-                    frame.window(settings, window, *tr.out_offset.value(), *tr.out_alpha.value(), fullscreen, floating, focused, &state.rule_effects(window));
+                    frame.window(settings, window, *tr.out_offset.value(), *tr.out_alpha.value(), fullscreen, floating, focused, &state.rule_effects(window), state.group_look(window));
                 }
             }
         }
@@ -540,7 +555,7 @@ impl Renderer {
         for window in state.space.elements().filter(|w| !in_special(w)) {
             let (fullscreen, floating) = (state.is_fullscreen(window), state.is_floating_here(window));
             let is_focused = focused.as_ref() == Some(window);
-            frame.window(settings, window, offset, alpha, fullscreen, floating, is_focused, &state.rule_effects(window));
+            frame.window(settings, window, offset, alpha, fullscreen, floating, is_focused, &state.rule_effects(window), state.group_look(window));
         }
         // A special workspace over the active one, which dims under it.
         let special_anim = state.wm.special_anim.as_ref();
@@ -556,13 +571,13 @@ impl Renderer {
                 for window in state.space.elements().filter(|w| in_special(w)) {
                     let (fullscreen, floating) = (state.is_fullscreen(window), state.is_floating_here(window));
                     let is_focused = focused.as_ref() == Some(window);
-                    frame.window(settings, window, s_offset, s_alpha, fullscreen, floating, is_focused, &state.rule_effects(window));
+                    frame.window(settings, window, s_offset, s_alpha, fullscreen, floating, is_focused, &state.rule_effects(window), state.group_look(window));
                 }
             } else if let Some(ws) = hiding.and_then(|a| state.wm.workspaces.get(&a.id)) {
-                for window in ws.windows() {
+                for window in ws.shown() {
                     let fullscreen = ws.fullscreen.as_ref() == Some(&window);
                     let floating = ws.floating.contains(&window);
-                    frame.window(settings, &window, s_offset, s_alpha, fullscreen, floating, false, &state.rule_effects(&window));
+                    frame.window(settings, &window, s_offset, s_alpha, fullscreen, floating, false, &state.rule_effects(&window), state.group_look(&window));
                 }
             }
         }
@@ -577,6 +592,7 @@ impl Renderer {
                 rounding: if closing.decorated { settings.rounding.max(0) as f64 } else { 0.0 },
                 border_size: settings.border_size.max(0) as f64,
                 shadow: true,
+                group: None,
             };
             frame.decorated(
                 settings,
@@ -665,6 +681,32 @@ impl Renderer {
         };
         *cache.borrow_mut() = Some(SurfaceTexture { commit, texture: texture.clone(), opaque });
         Some((texture, opaque))
+    }
+
+    /// A title's texture, drawn with Core Text the first time it's needed.
+    fn title_texture(&self, key: &TitleKey, font: Option<&str>) -> Option<Texture> {
+        if let Some(t) = self.titles.borrow().get(key) {
+            return Some(t.clone());
+        }
+        let color = key.color.map(|c| c as f32 / 255.0);
+        let bitmap = crate::text::render_line(&key.text, font, key.font_px as f64, key.width, key.height, color)?;
+        let texture = self.new_texture(bitmap.width, bitmap.height)?;
+        let region = MTLRegion {
+            origin: MTLOrigin { x: 0, y: 0, z: 0 },
+            size: MTLSize { width: bitmap.width, height: bitmap.height, depth: 1 },
+        };
+        // SAFETY: the bitmap holds width*height BGRA pixels, rows width*4 apart.
+        unsafe {
+            let bytes = NonNull::new_unchecked(bitmap.pixels.as_ptr() as *mut c_void);
+            texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(region, 0, bytes, bitmap.width * 4);
+        }
+        let mut titles = self.titles.borrow_mut();
+        // Titles change (a shell prompt, a page title): don't keep them all.
+        if titles.len() > 256 {
+            titles.clear();
+        }
+        titles.insert(key.clone(), texture.clone());
+        Some(texture)
     }
 
     /// The blur textures for a drawable size, made (again) when it changes.
@@ -835,6 +877,7 @@ impl Frame<'_> {
         floating: bool,
         focused: bool,
         rules: &crate::rules::Effects,
+        group: Option<crate::groups::GroupLook>,
     ) {
         let Some(toplevel) = window.toplevel() else { return };
         let Some((rect, goal, alpha, border)) =
@@ -863,6 +906,7 @@ impl Frame<'_> {
             rounding: if fullscreen { 0.0 } else { rules.rounding.unwrap_or(settings.rounding as f64).max(0.0) },
             border_size: rules.border_size.unwrap_or(settings.border_size as f64).max(0.0),
             shadow: !rules.no_shadow,
+            group,
         };
         let opacity = rules.opacity.map(|(active, inactive)| if focused { active } else { inactive }).unwrap_or(1.0);
         self.decorated(
@@ -921,6 +965,9 @@ impl Frame<'_> {
             let outer = Rect { x: rect.x - b, y: rect.y - b, w: rect.w + 2.0 * b, h: rect.h + 2.0 * b };
             self.border(outer, rounding + b, b, look.border);
         }
+        if let (true, Some(group)) = (look.decorated, &look.group) {
+            self.groupbar(settings, rect, b, group);
+        }
         self.xform = Xform { base: (rect.x, rect.y), anchor: (goal.x, goal.y), scale: (rect.w / goal.w, rect.h / goal.h) };
         self.round = (rounding > 0.0).then_some((rect, rounding));
         self.clip(look.clipped.then_some(rect));
@@ -975,15 +1022,79 @@ impl Frame<'_> {
         }
     }
 
+    /// A group's tab bar above a window at `rect` with border `b`, as
+    /// Hyprland's groupbar: per member, an indicator line (the active
+    /// colour for the focused one) under its title.
+    fn groupbar(&mut self, settings: &Settings, rect: Rect, b: f64, group: &crate::groups::GroupLook) {
+        let bar = &settings.group.bar;
+        let h = bar.reserved();
+        let bx = Rect { x: rect.x - b, y: rect.y - b - h, w: rect.w + 2.0 * b, h };
+        let n = group.titles.len().max(1) as f64;
+        let tab = (bx.w - bar.gaps_in * (n - 1.0)) / n;
+        if tab < 1.0 {
+            return;
+        }
+        let alpha = self.alpha;
+        for (i, title) in group.titles.iter().enumerate() {
+            let x = bx.x + i as f64 * (tab + bar.gaps_in);
+            let active = group.focused == Some(i);
+            let (col, text) = match (group.locked, active) {
+                (false, true) => (bar.col_active, bar.text_color),
+                (false, false) => (bar.col_inactive, bar.text_color_inactive),
+                (true, true) => (bar.col_locked_active, bar.text_color_locked_active),
+                (true, false) => (bar.col_locked_inactive, bar.text_color_locked_inactive),
+            };
+            if bar.indicator_height > 0.0 {
+                let indicator = Rect { x, y: bx.y + bx.h - bar.indicator_height - bar.gaps_out, w: tab, h: bar.indicator_height };
+                self.fill_rounded(indicator, col.map(|c| c * alpha), bar.rounding);
+            }
+            if bar.render_titles && !title.is_empty() {
+                let strip_y = bx.y + bx.h - bar.gaps_out - bar.indicator_height - bar.indicator_gap - bar.height;
+                let s = self.scale;
+                let text_h = bar.font_size + 4.0;
+                let width = ((tab - 2.0 * bar.text_padding) * s).round().max(1.0) as usize;
+                let height = (text_h * s).round().max(1.0) as usize;
+                let key = TitleKey {
+                    text: title.clone(),
+                    width,
+                    height,
+                    font_px: (bar.font_size * s).round() as u32,
+                    color: text.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8),
+                };
+                if let Some(texture) = self.renderer.title_texture(&key, bar.font_family.as_deref()) {
+                    let y = strip_y + (bar.height - text_h) / 2.0 - bar.text_offset;
+                    let r = self.px(Rect { x: x + bar.text_padding, y, w: width as f64 / s, h: height as f64 / s });
+                    let mut quad = Quad::empty();
+                    quad.dst = self.ndc(r[0] as f64, r[1] as f64, r[2] as f64, r[3] as f64);
+                    quad.alpha = alpha;
+                    let bytes = NonNull::from(&quad).cast::<c_void>();
+                    let len = std::mem::size_of::<Quad>();
+                    // SAFETY: `quad` outlives the calls, which copy it.
+                    unsafe {
+                        self.encoder.setVertexBytes_length_atIndex(bytes, len, 0);
+                        self.encoder.setFragmentBytes_length_atIndex(bytes, len, 0);
+                        self.encoder.setFragmentTexture_atIndex(Some(&texture), 0);
+                        self.encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::TriangleStrip, 0, 4);
+                    }
+                }
+            }
+        }
+    }
+
     /// A solid rectangle (logical), `color` premultiplied.
     fn fill(&mut self, rect: Rect, color: [f32; 4]) {
+        self.fill_rounded(rect, color, 0.0);
+    }
+
+    /// A solid rectangle (logical) with rounded corners, `color` premultiplied.
+    fn fill_rounded(&mut self, rect: Rect, color: [f32; 4], radius: f64) {
         let r = self.px(rect);
         let quad = ShadowQuad {
             dst: self.ndc(r[0] as f64, r[1] as f64, r[2] as f64, r[3] as f64),
             rect: r,
             window: [0.0; 4],
             color,
-            radius: 0.0,
+            radius: (radius.min(rect.w / 2.0).min(rect.h / 2.0) * self.scale) as f32,
             range: 0.0,
             power: 1.0,
             window_radius: 0.0,
@@ -1241,7 +1352,7 @@ fn frame_needs_blur(state: &State) -> bool {
     let translucent = |w: &smithay::desktop::Window| {
         w.toplevel().is_some_and(|t| !surface_opaque(t.wl_surface(), w.geometry()))
     };
-    let leaving = state.wm.transition.as_ref().and_then(|t| state.wm.workspaces.get(&t.from)).map(|ws| ws.windows());
+    let leaving = state.wm.transition.as_ref().and_then(|t| state.wm.workspaces.get(&t.from)).map(|ws| ws.shown());
     state.space.elements().any(translucent)
         || leaving.is_some_and(|ws| ws.iter().any(translucent))
         || state.closing.iter().any(|c| c.pieces.iter().any(|p| !p.opaque))

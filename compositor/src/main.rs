@@ -11,6 +11,7 @@ mod app;
 mod binds;
 mod config;
 mod gesture;
+mod groups;
 mod dwindle;
 mod capture;
 mod cursor;
@@ -23,6 +24,7 @@ mod mouse;
 mod render;
 mod rules;
 mod state;
+mod text;
 mod wm;
 
 use std::ffi::OsString;
