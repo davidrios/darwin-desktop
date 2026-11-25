@@ -4,8 +4,11 @@
 //! compositor's calloop loop (Wayland sockets) is driven from the same run
 //! loop: its kqueue fd is wrapped in a `CFFileDescriptor`, and when it turns
 //! readable the loop is dispatched without blocking. Frames come from the
-//! view's `CADisplayLink` at the display's refresh rate. Everything runs on
-//! the main thread, so the state lives in a thread-local.
+//! view's `CADisplayLink` at the display's refresh rate. The link pauses
+//! after a few frames with nothing to draw and resumes on any event (a
+//! client request, input, a window notification), so an idle session
+//! doesn't wake up at the refresh rate. Everything runs on the main thread,
+//! so the state lives in a thread-local.
 //!
 //! Keys come through a local event monitor rather than `keyDown:`: AppKit
 //! sends no `keyUp:` for keys released while Command is held, and the monitor
@@ -38,8 +41,13 @@ use objc2_foundation::{NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize,
 use objc2_quartz_core::CADisplayLink;
 use smithay::{
     backend::input::InputTime,
-    reexports::{calloop::EventLoop, wayland_server::Display},
+    desktop::utils::SurfacePresentationFeedback,
+    reexports::{
+        calloop::EventLoop, wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
+        wayland_server::Display,
+    },
     utils::{Logical, Size},
+    wayland::presentation::Refresh,
 };
 
 use crate::{
@@ -66,8 +74,17 @@ pub struct App {
     cursor: Option<CursorKey>,
     window: Retained<NSWindow>,
     view: Retained<CompositorView>,
-    /// Kept alive for the life of the app.
-    _display_link: Retained<CADisplayLink>,
+    display_link: Retained<CADisplayLink>,
+    /// Display refreshes in a row with nothing drawn or animating.
+    idle_frames: u32,
+    /// Presentation feedback for the frame drawn at the last refresh, sent
+    /// at the next one with that refresh's time.
+    pending_feedback: Vec<SurfacePresentationFeedback>,
+    /// When the last drawn frame reached the screen: the display link's
+    /// target time for it.
+    last_target: Duration,
+    /// Display refresh counter, the presentation `seq`.
+    frame_seq: u64,
     _fd_source: (CFRetained<CFFileDescriptor>, CFRetained<CFRunLoopSource>),
     _key_monitor: Option<Retained<AnyObject>>,
 }
@@ -77,8 +94,18 @@ thread_local! {
 }
 
 /// Runs `f` on the app, unless it isn't set up yet or is already borrowed
-/// (an AppKit callback re-entered while we were inside it).
+/// (an AppKit callback re-entered while we were inside it). Every event
+/// comes through here, so it also wakes the display link.
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
+    with_app_quiet(|app| {
+        let result = f(app);
+        app.wake();
+        result
+    })
+}
+
+/// `with_app` without waking the display link: for the link's own tick.
+fn with_app_quiet<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|app| match app.try_borrow_mut() {
         Ok(mut app) => app.as_mut().map(f),
         Err(_) => {
@@ -88,7 +115,22 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     })
 }
 
+/// Display refreshes with nothing to draw before the link pauses.
+const IDLE_FRAMES_BEFORE_PAUSE: u32 = 3;
+
+/// Darwin's `CLOCK_UPTIME_RAW` (`<time.h>`): `mach_absolute_time`, which is
+/// what `CADisplayLink` timestamps and GLib's `g_get_monotonic_time` count.
+pub const CLOCK_UPTIME_RAW: u32 = 8;
+
 impl App {
+    /// Something happened: draw at the next refresh if needed.
+    fn wake(&mut self) {
+        self.idle_frames = 0;
+        if self.display_link.isPaused() {
+            self.display_link.setPaused(false);
+        }
+    }
+
     /// Wayland requests are waiting: dispatch them, then send the replies.
     fn dispatch(&mut self) {
         if let Err(err) = self.event_loop.dispatch(Some(Duration::ZERO), &mut self.state) {
@@ -170,8 +212,10 @@ impl App {
     }
 
     /// One display refresh: draw if anything changed, then let clients draw
-    /// their next frame. Returns false when the window has been closed.
-    fn frame(&mut self) -> bool {
+    /// their next frame. `now` is this refresh, `target` the next one (when
+    /// what's drawn now reaches the screen), both in `CLOCK_UPTIME_RAW`
+    /// seconds. Returns false when the window has been closed.
+    fn frame(&mut self, now: f64, target: f64) -> bool {
         if !self.window.isVisible() || self.state.quit_requested {
             return false;
         }
@@ -183,12 +227,23 @@ impl App {
         }
         self.state.children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
 
-        if self.state.animate(std::time::Instant::now()) {
+        self.frame_seq += 1;
+        // The frame drawn at the last refresh is on screen now.
+        let refresh = Refresh::fixed(Duration::from_secs_f64((target - now).max(0.0)));
+        for mut feedback in self.pending_feedback.drain(..) {
+            feedback.presented(&self.state.output, CLOCK_UPTIME_RAW, self.last_target, refresh, self.frame_seq, wp_presentation_feedback::Kind::Vsync);
+        }
+
+        let animating = self.state.animate(std::time::Instant::now());
+        if animating {
             self.state.needs_redraw = true;
         }
-        if self.state.needs_redraw {
+        let drawn = self.state.needs_redraw;
+        if drawn {
             self.state.needs_redraw = false;
             self.renderer.render(&self.state);
+            self.pending_feedback = self.state.take_presentation_feedback();
+            self.last_target = Duration::from_secs_f64(target.max(0.0));
         }
 
         self.apply_cursor();
@@ -217,6 +272,15 @@ impl App {
         self.state.popups.cleanup();
         smithay::desktop::layer_map_for_output(&output).cleanup();
         self.flush();
+
+        if drawn || animating {
+            self.idle_frames = 0;
+        } else {
+            self.idle_frames += 1;
+            if self.idle_frames >= IDLE_FRAMES_BEFORE_PAUSE && self.pending_feedback.is_empty() {
+                self.display_link.setPaused(true);
+            }
+        }
         true
     }
 }
@@ -341,8 +405,9 @@ define_class!(
 
         /// The display link: one call per display refresh.
         #[unsafe(method(tick:))]
-        fn tick(&self, _link: &CADisplayLink) {
-            if with_app(App::frame) == Some(false) {
+        fn tick(&self, link: &CADisplayLink) {
+            let (now, target) = (link.timestamp(), link.targetTimestamp());
+            if with_app_quiet(|app| app.frame(now, target)) == Some(false) {
                 quit(self.mtm());
             }
         }
@@ -421,6 +486,64 @@ unsafe extern "C" {
 /// CFNotificationSuspensionBehaviorDeliverImmediately
 const DELIVER_IMMEDIATELY: isize = 4;
 
+/// Wakes the display link on window changes that come with no event of
+/// ours: losing or gaining key status (keyboard capture, held keys),
+/// resizing, the backing scale or screen changing. The observers live as
+/// long as the process.
+fn observe_window(window: &NSWindow) {
+    use objc2_app_kit::{
+        NSWindowDidBecomeKeyNotification, NSWindowDidChangeBackingPropertiesNotification,
+        NSWindowDidChangeOcclusionStateNotification, NSWindowDidChangeScreenNotification, NSWindowDidResignKeyNotification,
+        NSWindowDidResizeNotification,
+    };
+    use objc2_foundation::{NSNotification, NSNotificationCenter};
+    let center = NSNotificationCenter::defaultCenter();
+    // SAFETY: the names are AppKit's constant strings.
+    let names = unsafe {
+        [
+            NSWindowDidBecomeKeyNotification,
+            NSWindowDidResignKeyNotification,
+            NSWindowDidResizeNotification,
+            NSWindowDidChangeBackingPropertiesNotification,
+            NSWindowDidChangeScreenNotification,
+            NSWindowDidChangeOcclusionStateNotification,
+        ]
+    };
+    for name in names {
+        let block = RcBlock::new(|_: NonNull<NSNotification>| {
+            with_app(|_| ());
+        });
+        // SAFETY: the block is called on the main queue's thread (queue None
+        // means the posting thread, and AppKit posts these on the main thread).
+        let observer = unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), Some(window), None, &block) };
+        std::mem::forget(observer);
+    }
+}
+
+/// Hands the session bus the variables its activated services need to reach
+/// us, as Hyprland does at startup: the bus starts before the compositor
+/// (`dbus-run-session` in the session), so a service it starts on demand
+/// (dunst on the first notification) would otherwise find no
+/// `WAYLAND_DISPLAY`. Skipped without a session bus.
+fn update_activation_environment(state: &mut State, socket: &str, runtime_dir: &str) {
+    if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+        return;
+    }
+    let mut vars = vec![
+        format!("WAYLAND_DISPLAY={socket}"),
+        format!("XDG_RUNTIME_DIR={runtime_dir}"),
+        "XDG_SESSION_TYPE=wayland".to_string(),
+    ];
+    if let Ok(signature) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
+        vars.push(format!("HYPRLAND_INSTANCE_SIGNATURE={signature}"));
+    }
+    vars.extend(state.config.env().into_iter().map(|(k, v)| format!("{k}={v}")));
+    match Command::new("dbus-update-activation-environment").args(&vars).spawn() {
+        Ok(child) => state.children.push(child),
+        Err(err) => tracing::warn!("dbus-update-activation-environment: {err}"),
+    }
+}
+
 /// The calloop fd became readable.
 unsafe extern "C-unwind" fn loop_fd_ready(fd: *mut CFFileDescriptor, _types: CFOptionFlags, _info: *mut c_void) {
     with_app(App::dispatch);
@@ -443,6 +566,8 @@ pub fn run(mtm: MainThreadMarker, options: Options) {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
     tracing::info!("listening on {socket} (XDG_RUNTIME_DIR={runtime_dir})");
     println!("WAYLAND_DISPLAY={socket} XDG_RUNTIME_DIR={runtime_dir}");
+    let mut state = state;
+    update_activation_environment(&mut state, &socket, &runtime_dir);
 
     // The window: 80% of the main screen, or full screen with --fullscreen.
     let screen = NSScreen::mainScreen(mtm)
@@ -543,13 +668,18 @@ pub fn run(mtm: MainThreadMarker, options: Options) {
             cursor: None,
             window: window.clone(),
             view: view.clone(),
-            _display_link: display_link,
+            display_link,
+            idle_frames: 0,
+            pending_feedback: Vec::new(),
+            last_target: Duration::ZERO,
+            frame_seq: 0,
             _fd_source: fd_source,
             _key_monitor: key_monitor,
         });
     });
     with_app(App::sync_output);
     with_app(App::apply_keyboard_layout);
+    observe_window(&window);
     // SAFETY: the callback is a plain function; the name is a static CFString.
     unsafe {
         CFNotificationCenterAddObserver(

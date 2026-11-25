@@ -1268,7 +1268,10 @@ mod tests {
     fn load_str(src: &str) -> Config {
         let dir = std::env::temp_dir().join(format!("compositor-config-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("{}.lua", src.len()));
+        // A file per call: tests run in parallel, and two loading the same
+        // source must not write one file while the other reads it.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let path = dir.join(format!("{}.lua", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         std::fs::write(&path, src).unwrap();
         Config::load(Some(&path))
     }

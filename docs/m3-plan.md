@@ -25,7 +25,7 @@ Reviewed with the project owner on 2026-11-24 (answers below). Steps are ordered
 | File manager | nautilus | none | Deferred (needs GLib desktop app info, see step 6). |
 | Launcher | fzf in a terminal (`fzf-launcher`, `-desktop`) | scripts not ported | Works once the scripts find `.desktop` files; no GIO needed. |
 | Bar | waybar | runs | Check its Hyprland modules in detail. |
-| Notifications | mako | none | Needs a D-Bus session bus (step 3). |
+| Notifications | mako | none | dunst (owner, 2026-11-25), on the session bus (step 3). |
 | Audio and volume keys | pamixer, pactl, playerctl | none; media keys stay the host's | PulseAudio on CoreAudio (step 3). |
 | Idle and lock | swayidle, swaylock | none | Step 8; macOS's own lock still works meanwhile. |
 | Screenshots | grimshot (grim, slurp, wl-copy) | none | Step 8. |
@@ -57,16 +57,19 @@ Check: idle CPU and energy in Activity Monitor with a terminal and waybar open; 
 
 ## Step 2: clipboard
 
-- `zwp_primary_selection` (middle-click paste) and `ext-data-control` / `wlr-data-control`, needed by `wl-copy`/`wl-paste` and grimshot.
-- **macOS pasteboard bridge** (Stage A only: M5 has no pasteboard). When a Wayland client sets the selection, offer its types on `NSPasteboard` lazily (text, images, file URLs). When the pasteboard's `changeCount` moves (checked when the compositor window becomes key and on each paste), make a compositor-owned Wayland selection from it.
-- Terminal programs: check how bemtvi's TUI reaches the clipboard inside VTE (OSC 52 or `wl-copy`).
+Copy and paste between Wayland clients already works (`wl_data_device`). Adding:
 
-Check: copy and paste both ways between a GTK app and a Mac app, text and images.
+- `zwp_primary_selection` (select, then middle-click to paste).
+- `ext-data-control` / `wlr-data-control`, needed by `wl-copy`/`wl-paste` and grimshot.
+- Terminal programs: check how bemtvi's TUI reaches the clipboard inside VTE (OSC 52 or `wl-copy`).
+- **No bridge to the macOS pasteboard** (owner, 2026-11-25): the session's clipboard is its own.
+
+Check: middle-click paste between GTK apps and VTE; `wl-copy`/`wl-paste` round trip.
 
 ## Step 3: session services: D-Bus, notifications, audio
 
-- **D-Bus session bus** started by the session (nixpkgs' `dbus` builds on Darwin), with `DBUS_SESSION_BUS_ADDRESS` exported to clients. Removes the "Unable to acquire session bus" noise and unlocks mako, MPRIS (playerctl) and GTK's file-transfer portal registration (`gtk4-notes.md`).
-- **mako** for notifications (needs layer shell and D-Bus).
+- **D-Bus session bus** started by the session (nixpkgs' `dbus` builds on Darwin), with `DBUS_SESSION_BUS_ADDRESS` exported to clients. Removes the "Unable to acquire session bus" noise and unlocks notifications, MPRIS (playerctl) and GTK's file-transfer portal registration (`gtk4-notes.md`).
+- **dunst** for notifications (owner, 2026-11-25: mako's sd-bus library, basu, has no Darwin build; dunst uses GLib's D-Bus).
 - **Audio:** a PulseAudio daemon with its CoreAudio modules (`module-coreaudio-detect`) as the session's sound server, so pamixer, pactl, and GTK/GStreamer apps work unchanged. PipeWire has no CoreAudio backend. Firefox's cubeb can use PulseAudio or CoreAudio directly; prefer PulseAudio so pactl sees it. The volume keys stay macOS's in Stage A (fn/media keys aren't captured), which is fine.
 
 Check: a notification from `notify-send`, a sound from a GStreamer app, `pamixer -i 3` changes the volume.

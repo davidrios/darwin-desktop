@@ -1,0 +1,95 @@
+Build on Darwin
+
+- src/utils.c: Darwin's struct stat names the modification time
+  st_mtimespec, not st_mtim.
+- dunstify.c: the global `wait` (the --wait option) collides with libc's
+  wait(), which Darwin's <stdlib.h> declares; renamed `wait_close`.
+- config.mk: no -lrt on Darwin, whose libSystem has those functions.
+
+The Wayland code's <linux/input-event-codes.h> comes from the
+linux-input-headers package in the Nix scope, not from a patch.
+
+Drop when: dunst builds on Darwin upstream.
+
+diff --git a/config.mk b/config.mk
+index ba46157..e741f92 100644
+--- a/config.mk
++++ b/config.mk
+@@ -60,7 +60,11 @@ endif
+ # flags
+ DEFAULT_CPPFLAGS = -D_DEFAULT_SOURCE -DVERSION=\"${VERSION}\" -DSYSCONFDIR=\"${SYSCONFDIR}\" ${ENABLE_WAYLAND} ${ENABLE_X11}
+ DEFAULT_CFLAGS   = -g -std=gnu11 -pedantic -Wall -Wno-overlength-strings -Wno-expansion-to-defined -Os
+-DEFAULT_LDFLAGS  = -lm -lrt
++DEFAULT_LDFLAGS  = -lm
++# Darwin has no separate librt (its functions are in libSystem).
++ifneq ($(shell uname -s),Darwin)
++DEFAULT_LDFLAGS += -lrt
++endif
+ 
+ CPPFLAGS_DEBUG :=
+ CFLAGS_DEBUG   := -O0
+diff --git a/dunstify.c b/dunstify.c
+index 4b15832..ea0ed69 100644
+--- a/dunstify.c
++++ b/dunstify.c
+@@ -32,7 +32,7 @@ static gboolean serverinfo = false;
+ static gboolean printid = false;
+ static guint32 replace_id = 0;
+ static guint32 close_id = 0;
+-static gboolean wait = false;
++static gboolean wait_close = false;
+ static gchar **rest = NULL;
+ static gboolean transient = false;
+ static gboolean say_version = false;
+@@ -49,7 +49,7 @@ static GOptionEntry entries[] = {
+     { "hint",             'h', 0, G_OPTION_ARG_STRING_ARRAY,   &hint_strs,      "User specified hints", "TYPE:NAME:VALUE" },
+     { "print-id",         'p', 0, G_OPTION_ARG_NONE,           &printid,        "Print id, which can be used to update/replace this notification", NULL },
+     { "replace-id",       'r', 0, G_OPTION_ARG_INT,            &replace_id,     "Set id of this notification", "ID" },
+-    { "wait",             'w', 0, G_OPTION_ARG_NONE,           &wait,           "Block until notification is closed and print close reason", NULL },
++    { "wait",             'w', 0, G_OPTION_ARG_NONE,           &wait_close,           "Block until notification is closed and print close reason", NULL },
+     { "action",           'A', 0, G_OPTION_ARG_STRING_ARRAY,   &action_strs,    "Actions the user can invoke", "ACTION" },
+     { "close",            'C', 0, G_OPTION_ARG_INT,            &close_id,       "Close the notification with the specified ID", "ID" },
+     { "stack-tag",        0,   0, G_OPTION_ARG_STRING,         &stack_tag,      "Add a dunst stack tag to replace a notification with the same TAG", "TAG" },
+@@ -60,7 +60,7 @@ static GOptionEntry entries[] = {
+     { "timeout",          0,   0, G_OPTION_ARG_INT,            &timeout,        "Legacy alias of '--expire-time'", "TIMEOUT" },
+     { "printid",          0,   0, G_OPTION_ARG_NONE,           &printid,        "Legacy alias of '--print-id'", NULL },
+     { "replace",          0,   0, G_OPTION_ARG_INT,            &replace_id,     "Legacy alias of '--replace-id'", "ID" },
+-    { "block",            'b', 0, G_OPTION_ARG_NONE,           &wait,           "Legacy alias of '--wait'", NULL },
++    { "block",            'b', 0, G_OPTION_ARG_NONE,           &wait_close,           "Legacy alias of '--wait'", NULL },
+     { "raw_icon",         0,   0, G_OPTION_ARG_STRING,         &raw_icon_path,  "Legacy alias of '--raw-icon'", NULL },
+ 
+     // Generic informations
+@@ -347,7 +347,7 @@ int main(int argc, char *argv[])
+ 
+     GMainLoop *l = NULL;
+ 
+-    if (wait || action_strs) {
++    if (wait_close || action_strs) {
+         l = g_main_loop_new(NULL, false);
+         g_signal_connect(n, "closed", G_CALLBACK(closed), NULL);
+     }
+@@ -379,7 +379,7 @@ int main(int argc, char *argv[])
+         fflush(stdout);
+     }
+ 
+-    if (wait || action_strs)
++    if (wait_close || action_strs)
+         g_main_loop_run(l);
+ 
+     g_object_unref(G_OBJECT (n));
+diff --git a/src/utils.c b/src/utils.c
+index feda779..1456d00 100644
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -344,7 +344,11 @@ gint64 modification_time(const char *path)
+         if (!path || stat(path, &statbuf) != 0)
+                 return -1;
+ 
++#ifdef __APPLE__
++        return S2US(statbuf.st_mtimespec.tv_sec) + statbuf.st_mtimespec.tv_nsec / 1000;
++#else
+         return S2US(statbuf.st_mtim.tv_sec) + statbuf.st_mtim.tv_nsec / 1000;
++#endif
+ }
+ 
+ const char *user_get_home(void)

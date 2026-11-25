@@ -56,6 +56,44 @@ final: prev: {
           patches = (old.patches or [ ]) ++ [ ../patches/vte/001-darwin-fdwalk-stack.patch ];
         });
 
+    # wl-copy / wl-paste (data-control). Builds unpatched against our wayland.
+    wl-clipboard = (prev.wl-clipboard.override { inherit (self) wayland; }).overrideAttrs (old: {
+      meta = old.meta // {
+        platforms = old.meta.platforms ++ [ "aarch64-darwin" ];
+        badPlatforms = [ ];
+      };
+    });
+
+    # The session's sound server, on CoreAudio. Only the daemon is patched;
+    # clients use nixpkgs' libpulseaudio from the cache.
+    pulseaudio = prev.pulseaudio.overrideAttrs (old: {
+      patches = (old.patches or [ ]) ++ [ ../patches/pulseaudio/001-coreaudio-detect-skip-unused-devices.patch ];
+    });
+    # Volume keys in the owner's config. Plain libpulse; nixpkgs marks it Linux-only.
+    pamixer = prev.pamixer.overrideAttrs (old: {
+      meta = old.meta // {
+        platforms = old.meta.platforms ++ [ "aarch64-darwin" ];
+      };
+    });
+
+    # Notification daemon (owner, 2026-11-25: dunst rather than mako, whose
+    # sd-bus library has no Darwin build). Wayland only; systemd is only
+    # there to find the user unit directory.
+    dunst =
+      (prev.dunst.override {
+        inherit (self) wayland;
+        withX11 = false;
+        systemdLibs = null;
+      }).overrideAttrs
+        (old: {
+          nativeBuildInputs = builtins.filter (p: p != null) old.nativeBuildInputs;
+          buildInputs = old.buildInputs ++ [ self.linux-input-headers ];
+          patches = (old.patches or [ ]) ++ [ ../patches/dunst/001-darwin.patch ];
+          meta = old.meta // {
+            platforms = old.meta.platforms ++ [ "aarch64-darwin" ];
+          };
+        });
+
     wl-spike = self.callPackage ../spikes/m0-wayland { };
     wl-spike-test = self.callPackage ../spikes/m0-wayland/test.nix { };
   });

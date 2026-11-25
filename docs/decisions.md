@@ -2,6 +2,20 @@
 
 Newest first. Each entry: what was decided, why, and what it implies. Earlier decisions are recorded in `PROJECT_OUTLINE.md` section 2.
 
+## 2026-11-25: dunst for notifications
+
+**Decision (owner):** The session's notification daemon is dunst, not mako (which the owner's Linux config starts).
+
+**Why:** mako talks to D-Bus through an sd-bus library, and the usable one (basu) has no Darwin build: porting it means Linux peer credentials, ELF section tricks, endian and locale headers. dunst uses GLib's D-Bus, which already works here, and needed a three-line patch.
+
+**Implications:** dunst starts on demand through D-Bus activation, so the config needs no exec line; the owner's `hl.exec_cmd("mako")` finds nothing and can go. dunst reads `~/.config/dunst/dunstrc`, and uses built-in defaults without one.
+
+## 2026-11-25: no clipboard sharing with macOS
+
+**Decision (owner):** The session's clipboard is Wayland's own: between clients, plus primary selection and data-control for tools like `wl-copy`. There is no bridge to the macOS pasteboard.
+
+**Why:** The session is meant to replace the Mac desktop, not sit beside it, and M5 has no pasteboard at all.
+
 ## 2026-11-24: Firefox on Darwin keeps the OS as OSX, uses the GTK toolkit and CoreText fonts
 
 **Decision:** Firefox is ported with `target.os` left as OSX and the GTK 3 Wayland-only toolkit. `XP_DARWIN`/`XP_MACOSX` keep meaning the Darwin OS and its non-AppKit frameworks, and sites that mean AppKit move to `MOZ_WIDGET_COCOA`. Page fonts stay on CoreText (the Mac font path in gfx/2d and WebRender) rather than fontconfig. Rendering is software WebRender through wl_shm until M4. The brief is `firefox-port.md`; the survey is `firefox-notes.md`.

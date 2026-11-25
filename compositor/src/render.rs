@@ -1,8 +1,9 @@
 //! Metal renderer: each client surface's shm buffer becomes a texture, drawn
 //! as a quad into the window's `CAMetalLayer`.
 //!
-//! M1 uploads a surface's whole buffer whenever it has a new commit and
-//! redraws the whole frame; damage tracking comes later.
+//! A surface's texture is updated from its shm buffer when it has a new
+//! commit, only where the client damaged it. The whole frame is redrawn
+//! whenever anything changed (no output damage tracking).
 //!
 //! Windows are drawn where their animations are (`anim`): a window's content
 //! is laid out at its goal rectangle and mapped into the animated one, scaled
@@ -24,7 +25,7 @@ use smithay::{
     backend::renderer::utils::{CommitCounter, RendererSurfaceStateUserData},
     desktop::PopupManager,
     reexports::wayland_server::protocol::{wl_shm, wl_surface::WlSurface},
-    utils::{Logical, Point, Rectangle, Size},
+    utils::{Buffer as BufferCoord, Logical, Point, Rectangle, Size},
     wayland::{
         compositor::{SurfaceData, TraversalAction, with_surface_tree_downward},
         shm::with_buffer_contents,
@@ -370,6 +371,9 @@ impl Quad {
 type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
 
 /// A surface's uploaded buffer, kept in the surface's data map.
+/// Above this many damage rectangles, a buffer is uploaded whole.
+const MAX_DAMAGE_RECTS: usize = 16;
+
 struct SurfaceTexture {
     commit: CommitCounter,
     texture: Texture,
@@ -655,19 +659,32 @@ impl Renderer {
             if end > len {
                 return None;
             }
-            let reuse = cache.borrow().as_ref().map(|c| c.texture.clone()).filter(|t| {
-                t.width() == w as usize && t.height() == h as usize
-            });
-            let texture = reuse.or_else(|| self.new_texture(w as usize, h as usize))?;
-            let region = MTLRegion {
-                origin: MTLOrigin { x: 0, y: 0, z: 0 },
-                size: MTLSize { width: w as usize, height: h as usize, depth: 1 },
+            let full = Rectangle::<i32, BufferCoord>::from_size((w, h).into());
+            // The cached texture holds the surface as of its commit: when the
+            // size is the same, only what was damaged since then is uploaded
+            // (whichever of the client's buffers is attached now).
+            let reuse = cache.borrow().as_ref().filter(|c| c.texture.width() == w as usize && c.texture.height() == h as usize).map(|c| (c.texture.clone(), c.commit));
+            let (texture, regions) = match reuse {
+                Some((texture, since)) => {
+                    let damage: Vec<_> = data.damage_since(Some(since)).iter().filter_map(|r| r.intersection(full)).collect();
+                    // Many small rectangles cost more calls than one whole upload.
+                    if damage.len() > MAX_DAMAGE_RECTS { (texture, vec![full]) } else { (texture, damage) }
+                }
+                None => (self.new_texture(w as usize, h as usize)?, vec![full]),
             };
-            // SAFETY: the range was checked against the pool's length above,
-            // and BGRA8 matches wl_shm's little-endian (A|X)RGB8888.
-            unsafe {
-                let bytes = NonNull::new_unchecked(ptr.add(offset as usize) as *mut c_void);
-                texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(region, 0, bytes, stride as usize);
+            for rect in regions {
+                let region = MTLRegion {
+                    origin: MTLOrigin { x: rect.loc.x as usize, y: rect.loc.y as usize, z: 0 },
+                    size: MTLSize { width: rect.size.w as usize, height: rect.size.h as usize, depth: 1 },
+                };
+                let start = offset as usize + rect.loc.y as usize * stride as usize + rect.loc.x as usize * 4;
+                // SAFETY: the rectangle lies inside the buffer, whose extent was
+                // checked against the pool's length above; BGRA8 matches wl_shm's
+                // little-endian (A|X)RGB8888.
+                unsafe {
+                    let bytes = NonNull::new_unchecked(ptr.add(start) as *mut c_void);
+                    texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(region, 0, bytes, stride as usize);
+                }
             }
             Some((texture, opaque))
         });

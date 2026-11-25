@@ -14,6 +14,8 @@ There are two ways a queue gets applied:
 | `gtk3/` | GTK 3.24.52 (nixpkgs) | Nix, `nix/pkgs/gtk3.nix` |
 | `waybar/` | Waybar 0.16.0 (nixpkgs) | Nix, `nix/pkgs/waybar.nix` |
 | `vte/` | VTE 0.84.1 (nixpkgs) | Nix, `nix/overlay.nix` |
+| `pulseaudio/` | PulseAudio 17.0 (nixpkgs) | Nix, `nix/overlay.nix` |
+| `dunst/` | dunst 1.13.2 (nixpkgs) | Nix, `nix/overlay.nix` |
 
 ## Submodule queues: `scripts/prepare-third-party.sh`
 
@@ -100,3 +102,15 @@ The nix package also removes the "no Wayland on Darwin" line from `meson.build`,
 | Patch | What / why | Drop when |
 |---|---|---|
 | `001-darwin-fdwalk-stack` | Darwin `fdwalk()` sized its `proc_pidinfo(PROC_PIDLISTFDS)` buffer, a stack VLA, from `RLIMIT_NOFILE`; with a high limit (1048576, common in shells) that's 8 MiB and the app crashed spawning its shell. Now sized from the fds actually open (a NULL-buffer call returns the size), still without malloc, so still safe after fork | Upstream fixes it |
+
+## pulseaudio
+
+| Patch | What / why | Drop when |
+|---|---|---|
+| `001-coreaudio-detect-skip-unused-devices` | With `record=no`, `module-coreaudio-detect` still loaded the device module for input-only devices (the built-in microphone). Its IOProc there made CoreAudio check the microphone permission, blocking the daemon's startup until the prompt was answered, or for about a minute with no prompt. Devices with no streams in an enabled direction are now skipped | Upstream skips them, or the session opens the microphone with permission granted up front |
+
+## dunst
+
+| Patch | What / why | Drop when |
+|---|---|---|
+| `001-darwin` | Build on Darwin: `st_mtimespec` for `st_mtim`; dunstify's global `wait` renamed (it collides with libc's `wait()`); no `-lrt`. `linux/input-event-codes.h` comes from `linux-input-headers` | dunst builds on Darwin upstream |

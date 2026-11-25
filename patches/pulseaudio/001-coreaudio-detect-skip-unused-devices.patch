@@ -1,0 +1,44 @@
+module-coreaudio-detect: skip devices with no streams for the enabled directions
+
+With record=no, module-coreaudio-detect still loads module-coreaudio-device
+for input-only devices such as the built-in microphone. That module creates
+an IOProc on every device it loads for, and an IOProc on a microphone makes
+CoreAudio check the microphone permission (TCC): the daemon's startup blocks
+in AudioDeviceCreateIOProcID until the user answers the prompt, or for about
+a minute when no prompt can be shown. While it blocks, the main loop isn't
+running, so the daemon doesn't answer clients or signals. Skip a device that
+has no streams in an enabled direction.
+
+Drop when: upstream skips such devices, or the session wants the microphone
+(record=yes) and grants it up front.
+
+--- a/src/modules/macosx/module-coreaudio-detect.c	2026-11-25 00:16:43
++++ b/src/modules/macosx/module-coreaudio-detect.c	2026-11-25 00:16:43
+@@ -90,6 +90,27 @@
+     if (!err && pa_streq(tmp, "pulseaudio.org"))
+         return 0;
+ 
++    /* Skip devices that have no streams in a direction we were asked for:
++       an input-only device (the built-in microphone) with record=no.
++       module-coreaudio-device creates an IOProc on every device it loads
++       for, and an IOProc on a microphone makes CoreAudio check the
++       microphone permission, which blocks until the user answers (or for
++       about a minute when no prompt can be shown). */
++    if (!u->record || !u->playback) {
++        bool has_output = false, has_input = false;
++
++        property_address.mSelector = kAudioDevicePropertyStreams;
++        property_address.mScope = kAudioDevicePropertyScopeOutput;
++        has_output = AudioObjectGetPropertyDataSize(id, &property_address, 0, NULL, &size) == noErr && size > 0;
++        property_address.mScope = kAudioDevicePropertyScopeInput;
++        has_input = AudioObjectGetPropertyDataSize(id, &property_address, 0, NULL, &size) == noErr && size > 0;
++
++        if (!(u->playback && has_output) && !(u->record && has_input)) {
++            pa_log_debug("Skipping CoreAudio device %d: no streams for the enabled directions", (int) id);
++            return 0;
++        }
++    }
++
+     if (u->ioproc_frames)
+         args = pa_sprintf_malloc("object_id=%d ioproc_frames=%d record=%d playback=%d", (int) id, u->ioproc_frames, (int) u->record, (int) u->playback);
+     else

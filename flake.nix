@@ -32,6 +32,10 @@
           gtk3
           gtk-layer-shell
           waybar
+          wl-clipboard
+          dunst
+          pulseaudio
+          pamixer
           compositor
           vte
           session

@@ -75,10 +75,15 @@ pub struct State {
     pub _output_manager_state: OutputManagerState,
     pub seat_state: SeatState<State>,
     pub data_device_state: DataDeviceState,
+    pub primary_selection_state: smithay::wayland::selection::primary_selection::PrimarySelectionState,
+    pub data_control_state: smithay::wayland::selection::ext_data_control::DataControlState,
+    pub wlr_data_control_state: smithay::wayland::selection::wlr_data_control::DataControlState,
     pub seat: Seat<State>,
 
     /// Keeps the cursor-shape global alive.
     pub _cursor_shape_state: CursorShapeManagerState,
+    /// Kept alive: owns the wp_presentation global.
+    pub _presentation_state: smithay::wayland::presentation::PresentationState,
     /// What the client under the pointer wants as cursor.
     pub cursor_status: CursorImageStatus,
     pub pointer_location: Point<f64, Logical>,
@@ -116,7 +121,23 @@ impl State {
         let layer_shell_state = smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<State>(&dh);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&dh);
         let data_device_state = DataDeviceState::new::<State>(&dh);
+        // Middle-click paste, and clipboard managers / wl-clipboard (both
+        // data-control flavours; any client may use them, as in Hyprland).
+        let primary_selection_state =
+            smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<State>(&dh);
+        let data_control_state = smithay::wayland::selection::ext_data_control::DataControlState::new::<State, _>(
+            &dh,
+            Some(&primary_selection_state),
+            |_| true,
+        );
+        let wlr_data_control_state = smithay::wayland::selection::wlr_data_control::DataControlState::new::<State, _>(
+            &dh,
+            Some(&primary_selection_state),
+            |_| true,
+        );
         let cursor_shape_state = CursorShapeManagerState::new::<State>(&dh);
+        let presentation_state =
+            smithay::wayland::presentation::PresentationState::new::<State>(&dh, crate::app::CLOCK_UPTIME_RAW);
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<State> = seat_state.new_wl_seat(&dh, "seat0");
@@ -167,8 +188,12 @@ impl State {
             _output_manager_state: output_manager_state,
             seat_state,
             data_device_state,
+            primary_selection_state,
+            data_control_state,
+            wlr_data_control_state,
             seat,
             _cursor_shape_state: cursor_shape_state,
+            _presentation_state: presentation_state,
             cursor_status: CursorImageStatus::Named(CursorIcon::Default),
             pointer_location: (0.0, 0.0).into(),
             needs_redraw: true,
@@ -446,7 +471,8 @@ impl SeatHandler for State {
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let dh = &self.display_handle;
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
-        set_data_device_focus(dh, seat, client);
+        set_data_device_focus(dh, seat, client.clone());
+        smithay::wayland::selection::primary_selection::set_primary_focus(dh, seat, client);
     }
 }
 
@@ -470,6 +496,24 @@ impl DataDeviceHandler for State {
     }
 }
 
+impl smithay::wayland::selection::primary_selection::PrimarySelectionHandler for State {
+    fn primary_selection_state(&mut self) -> &mut smithay::wayland::selection::primary_selection::PrimarySelectionState {
+        &mut self.primary_selection_state
+    }
+}
+
+impl smithay::wayland::selection::ext_data_control::DataControlHandler for State {
+    fn data_control_state(&mut self) -> &mut smithay::wayland::selection::ext_data_control::DataControlState {
+        &mut self.data_control_state
+    }
+}
+
+impl smithay::wayland::selection::wlr_data_control::DataControlHandler for State {
+    fn data_control_state(&mut self) -> &mut smithay::wayland::selection::wlr_data_control::DataControlState {
+        &mut self.wlr_data_control_state
+    }
+}
+
 impl DndGrabHandler for State {}
 
 impl WaylandDndGrabHandler for State {
@@ -490,6 +534,52 @@ impl WaylandDndGrabHandler for State {
             }
             GrabType::Touch => source.cancel(),
         }
+    }
+}
+
+// ---- wp_presentation ----
+
+impl State {
+    /// Takes the presentation feedback of every surface just drawn: windows
+    /// on screen and their popups, layer surfaces, the cursor.
+    pub fn take_presentation_feedback(&self) -> Vec<smithay::desktop::utils::SurfacePresentationFeedback> {
+        use smithay::wayland::compositor::{TraversalAction, with_surface_tree_downward};
+        use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind;
+        let mut out = Vec::new();
+        let mut take = |surface: &WlSurface| {
+            with_surface_tree_downward(
+                surface,
+                (),
+                |_, _, &()| TraversalAction::DoChildren(()),
+                |_, states, &()| {
+                    out.extend(smithay::desktop::utils::SurfacePresentationFeedback::from_states(states, Kind::empty()));
+                },
+                |_, _, &()| true,
+            );
+            for (popup, _) in smithay::desktop::PopupManager::popups_for_surface(surface) {
+                with_surface_tree_downward(
+                    popup.wl_surface(),
+                    (),
+                    |_, _, &()| TraversalAction::DoChildren(()),
+                    |_, states, &()| {
+                        out.extend(smithay::desktop::utils::SurfacePresentationFeedback::from_states(states, Kind::empty()));
+                    },
+                    |_, _, &()| true,
+                );
+            }
+        };
+        for window in self.space.elements() {
+            if let Some(surface) = smithay::wayland::seat::WaylandFocus::wl_surface(window) {
+                take(&surface);
+            }
+        }
+        for layer in smithay::desktop::layer_map_for_output(&self.output).layers() {
+            take(layer.wl_surface());
+        }
+        if let smithay::input::pointer::CursorImageStatus::Surface(surface) = &self.cursor_status {
+            take(surface);
+        }
+        out
     }
 }
 
